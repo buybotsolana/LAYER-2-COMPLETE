@@ -110,19 +110,29 @@ impl DepositProcessor {
         
         // Crea una transazione di deposito
         let clock = Clock::get()?;
+        
+        // Calcola il nuovo nonce in modo sicuro
+        let new_nonce = recipient_account.nonce.checked_add(1)
+            .ok_or(handle_error(Layer2Error::ArithmeticOverflow))?;
+        
+        // Calcola il timestamp di scadenza in modo sicuro
+        let current_timestamp = clock.unix_timestamp as u64;
+        let expiry_timestamp = current_timestamp.checked_add(3600) // 1 ora di scadenza
+            .ok_or(handle_error(Layer2Error::ArithmeticOverflow))?;
+        
         let transaction = Transaction::new(
             *sender_info.key,
             *recipient_info.key,
             amount,
-            recipient_account.nonce + 1,
-            clock.unix_timestamp as u64 + 3600, // 1 ora di scadenza
+            new_nonce,
+            expiry_timestamp,
             TransactionType::Deposit,
             data,
             vec![], // Firma vuota per ora
         );
         
-        // Aggiorna il nonce dell'account del destinatario
-        recipient_account.increment_nonce();
+        // Aggiorna il nonce dell'account del destinatario in modo sicuro
+        recipient_account.nonce = new_nonce;
         
         // Aggiorna lo stato del Layer-2
         // In un'implementazione reale, aggiorneremmo l'albero di Merkle degli account
@@ -156,6 +166,11 @@ impl DepositProcessor {
         let rent = Rent::from_account_info(rent_info)?;
         let space = Account::LEN;
         let lamports = rent.minimum_balance(space);
+        
+        // Verifica che il pagatore abbia abbastanza lamports
+        if payer_info.lamports() < lamports {
+            return Err(handle_error(Layer2Error::InsufficientBalance));
+        }
         
         // Crea l'account
         invoke(
@@ -253,7 +268,9 @@ impl DepositProcessor {
         }
         
         // Verifica che il batch non superi la dimensione massima
-        if transactions.len() > 1024 {
+        // Utilizziamo una costante per la dimensione massima del batch
+        const MAX_BATCH_SIZE: usize = 1024;
+        if transactions.len() > MAX_BATCH_SIZE {
             return Err(handle_error(Layer2Error::BatchTooLarge));
         }
         
@@ -411,5 +428,121 @@ mod tests {
         
         // Verifica che il deposito sia stato eseguito con successo
         assert!(result.is_ok());
+    }
+    
+    // Test per verificare la gestione degli overflow aritmetici
+    #[test]
+    fn test_arithmetic_overflow() {
+        // Crea un program_id
+        let program_id = Pubkey::new_unique();
+        
+        // Crea gli account necessari
+        let state_key = Pubkey::new_unique();
+        let sender_key = Pubkey::new_unique();
+        let recipient_key = Pubkey::new_unique();
+        
+        let mut state_lamports = 0;
+        let mut state_data = vec![0; Layer2State::LEN];
+        let state_account_info = AccountInfo::new(
+            &state_key,
+            false,
+            true,
+            &mut state_lamports,
+            &mut state_data,
+            &program_id,
+            false,
+            Epoch::default(),
+        );
+        
+        let mut sender_lamports = u64::MAX;
+        let mut sender_data = vec![];
+        let sender_account_info = AccountInfo::new(
+            &sender_key,
+            true,
+            false,
+            &mut sender_lamports,
+            &mut sender_data,
+            &Pubkey::default(),
+            false,
+            Epoch::default(),
+        );
+        
+        let mut recipient_lamports = 0;
+        let mut recipient_data = vec![0; Account::LEN];
+        let recipient_account_info = AccountInfo::new(
+            &recipient_key,
+            false,
+            true,
+            &mut recipient_lamports,
+            &mut recipient_data,
+            &program_id,
+            false,
+            Epoch::default(),
+        );
+        
+        let mut system_program_lamports = 0;
+        let mut system_program_data = vec![];
+        let system_program_account_info = AccountInfo::new(
+            &solana_program::system_program::id(),
+            false,
+            false,
+            &mut system_program_lamports,
+            &mut system_program_data,
+            &Pubkey::default(),
+            false,
+            Epoch::default(),
+        );
+        
+        let mut rent_lamports = 0;
+        let mut rent_data = vec![];
+        let rent_account_info = AccountInfo::new(
+            &solana_program::sysvar::rent::id(),
+            false,
+            false,
+            &mut rent_lamports,
+            &mut rent_data,
+            &Pubkey::default(),
+            false,
+            Epoch::default(),
+        );
+        
+        let accounts = vec![
+            state_account_info,
+            sender_account_info,
+            recipient_account_info,
+            system_program_account_info,
+            rent_account_info,
+        ];
+        
+        // Inizializza lo stato
+        let state = Layer2State::new(
+            1,
+            0,
+            0,
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            sender_key,
+        );
+        state.pack_into_slice(&mut state_data);
+        
+        // Inizializza l'account del destinatario con un saldo massimo
+        let mut recipient_account = Account::new(recipient_key);
+        recipient_account.balance = u64::MAX - 100; // Quasi al massimo
+        recipient_account.pack_into_slice(&mut recipient_data);
+        
+        // Esegui il deposito con un importo che causerebbe overflow
+        let result = DepositProcessor::process_deposit(
+            &program_id,
+            &accounts,
+            101, // Questo causerebbe overflow
+            vec![1, 2, 3],
+        );
+        
+        // Verifica che il deposito fallisca con errore di overflow aritmetico
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert_eq!(err, Layer2Error::ArithmeticOverflow.into());
+        }
     }
 }
