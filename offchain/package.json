@@ -12,12 +12,13 @@
     "start": "node index-with-recovery.js",
     "test": "jest --config jest.config.js",
     "lint": "eslint . --ext .js",
-    "build": "mkdir -p dist && cp *.js dist/"
+    "build": "mkdir -p dist && cp *.js dist/",
+    "security-check": "npm audit"
   },
   "author": "Solana Layer 2 Team",
   "license": "MIT",
   "dependencies": {
-    "@solana/web3.js": "^1.73.3",
+    "@solana/web3.js": "^1.73.0",
     "merkletreejs": "^0.3.10",
     "crypto-js": "^4.1.1",
     "dotenv": "^16.0.3",
@@ -26,7 +27,9 @@
     "express": "^4.18.2",
     "cors": "^2.8.5",
     "prom-client": "^14.2.0",
-    "socket.io": "^4.6.1"
+    "socket.io": "^4.6.1",
+    "mongodb": "^4.13.0",
+    "redis": "^4.6.4"
   },
   "devDependencies": {
     "jest": "^29.5.0",
