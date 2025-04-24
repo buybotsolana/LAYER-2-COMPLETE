@@ -141,6 +141,9 @@ class Sequencer {
         
         // Callback per le notifiche di failover e rotazione delle chiavi
         this.notifyCallback = this.handleHsmNotification.bind(this);
+        
+        // Prepared statements per prevenire SQL injection
+        this.preparedStatements = {};
     }
 
     /**
@@ -160,6 +163,9 @@ class Sequencer {
             
             // Inizializza il database
             await this.initializeDatabase();
+            
+            // Inizializza i prepared statements
+            await this.initializePreparedStatements();
             
             // Inizializza i worker
             await this.initializeWorkers();
@@ -381,8 +387,8 @@ class Sequencer {
             const logFile = path.join(logDir, `hsm-notifications-${new Date().toISOString().split('T')[0]}.log`);
             await promisify(fs.appendFile)(logFile, JSON.stringify(logEvent) + '\n');
             
-            // Invia una notifica agli amministratori (in un'implementazione reale)
-            // Ad esempio, inviando un'email o un messaggio a un sistema di monitoraggio
+            // Registra l'evento HSM nel database usando prepared statement
+            await this.logHsmEvent(notification.type, notification);
             
             return true;
         } catch (error) {
@@ -463,6 +469,56 @@ class Sequencer {
             return true;
         } catch (error) {
             console.error('Errore durante l\'inizializzazione del database:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Inizializza i prepared statements per prevenire SQL injection
+     */
+    async initializePreparedStatements() {
+        try {
+            console.log('Inizializzazione dei prepared statements...');
+            
+            // Prepared statement per il conteggio delle transazioni in sospeso
+            this.preparedStatements.getPendingTransactionCount = await this.db.prepare(
+                'SELECT COUNT(*) as count FROM transactions WHERE status = ?'
+            );
+            
+            // Prepared statement per il recupero delle transazioni in sospeso
+            this.preparedStatements.getPendingTransactions = await this.db.prepare(
+                'SELECT * FROM transactions WHERE status = ? ORDER BY created_at ASC LIMIT ?'
+            );
+            
+            // Prepared statement per l'inserimento di un batch
+            this.preparedStatements.insertBatch = await this.db.prepare(
+                'INSERT INTO batches (merkle_root, transaction_count, status, created_at) VALUES (?, ?, ?, ?)'
+            );
+            
+            // Prepared statement per l'aggiornamento dello stato delle transazioni
+            this.preparedStatements.updateTransactionsStatus = await this.db.prepare(
+                'UPDATE transactions SET status = ?, processed_at = ?, error = ? WHERE batch_id = ?'
+            );
+            
+            // Prepared statement per l'inserimento di una transazione
+            this.preparedStatements.insertTransaction = await this.db.prepare(
+                'INSERT INTO transactions (sender, recipient, amount, nonce, expiry_timestamp, transaction_type, data, signature, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            );
+            
+            // Prepared statement per l'inserimento di un evento HSM
+            this.preparedStatements.insertHsmEvent = await this.db.prepare(
+                'INSERT INTO hsm_events (event_type, event_data, created_at) VALUES (?, ?, ?)'
+            );
+            
+            // Prepared statement per l'aggiornamento del batch_id delle transazioni
+            this.preparedStatements.updateTransactionsBatchId = await this.db.prepare(
+                'UPDATE transactions SET batch_id = ? WHERE id = ?'
+            );
+            
+            console.log('Prepared statements inizializzati con successo');
+            return true;
+        } catch (error) {
+            console.error('Errore durante l\'inizializzazione dei prepared statements:', error);
             throw error;
         }
     }
@@ -643,6 +699,14 @@ class Sequencer {
                 this.keyManager = null;
             }
             
+            // Chiudi i prepared statements
+            for (const [name, stmt] of Object.entries(this.preparedStatements)) {
+                if (stmt && typeof stmt.finalize === 'function') {
+                    await stmt.finalize();
+                }
+            }
+            this.preparedStatements = {};
+            
             // Chiudi la connessione al database
             if (this.db) {
                 await this.db.close();
@@ -714,13 +778,256 @@ class Sequencer {
      */
     async getPendingTransactionCount() {
         try {
-            const result = await this.db.get('SELECT COUNT(*) as count FROM transactions WHERE status = 0');
+            // Usa prepared statement per prevenire SQL injection
+            const result = await this.preparedStatements.getPendingTransactionCount.get(0);
             return result.count;
         } catch (error) {
             console.error('Errore durante il recupero del numero di transazioni in sospeso:', error);
             this.errorManager.handleError('database', error);
             return 0;
         }
+    }
+
+    /**
+     * Recupera le transazioni in sospeso
+     * @returns {Promise<Array>} Le transazioni in sospeso
+     */
+    async getPendingTransactions() {
+        try {
+            // Usa prepared statement per prevenire SQL injection
+            const transactions = await this.preparedStatements.getPendingTransactions.all(0, this.config.batchSize);
+            return transactions;
+        } catch (error) {
+            console.error('Errore durante il recupero delle transazioni in sospeso:', error);
+            this.errorManager.handleError('database', error);
+            return [];
+        }
+    }
+
+    /**
+     * Crea un batch di transazioni
+     * @param {Array} transactions - Le transazioni da includere nel batch
+     * @returns {Promise<Object>} Il batch creato
+     */
+    async createBatch(transactions) {
+        try {
+            // Crea un albero di Merkle delle transazioni
+            const merkleTree = new MerkleTree(transactions.map(tx => this.hashTransaction(tx)));
+            const merkleRoot = merkleTree.getRoot().toString('hex');
+            
+            // Inserisci il batch nel database usando prepared statement
+            const result = await this.preparedStatements.insertBatch.run(
+                merkleRoot,
+                transactions.length,
+                0,
+                Date.now()
+            );
+            
+            const batchId = result.lastID;
+            
+            // Aggiorna le transazioni con il batch ID usando prepared statement
+            for (const tx of transactions) {
+                await this.preparedStatements.updateTransactionsBatchId.run(batchId, tx.id);
+            }
+            
+            return {
+                id: batchId,
+                merkleRoot,
+                transactions,
+                merkleTree,
+            };
+        } catch (error) {
+            console.error('Errore durante la creazione del batch:', error);
+            this.errorManager.handleError('database', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Calcola l'hash di una transazione
+     * @param {Object} transaction - La transazione
+     * @returns {Buffer} L'hash della transazione
+     */
+    hashTransaction(transaction) {
+        const data = Buffer.concat([
+            Buffer.from(transaction.sender),
+            Buffer.from(transaction.recipient),
+            Buffer.from(transaction.amount.toString()),
+            Buffer.from(transaction.nonce.toString()),
+            Buffer.from(transaction.expiry_timestamp.toString()),
+            Buffer.from(transaction.transaction_type.toString()),
+            transaction.data || Buffer.from([]),
+        ]);
+        
+        return crypto.createHash('sha256').update(data).digest();
+    }
+
+    /**
+     * Ottiene l'indice del prossimo worker disponibile
+     * @returns {number} L'indice del worker
+     */
+    getNextWorkerIndex() {
+        // Implementazione semplice: round-robin
+        this._lastWorkerIndex = (this._lastWorkerIndex || -1) + 1;
+        if (this._lastWorkerIndex >= this.workers.length) {
+            this._lastWorkerIndex = 0;
+        }
+        return this._lastWorkerIndex;
+    }
+
+    /**
+     * Aggiorna lo stato delle transazioni
+     * @param {number} batchId - L'ID del batch
+     * @param {number} status - Il nuovo stato (1 = elaborata, 2 = errore)
+     * @param {string} error - L'errore (opzionale)
+     * @returns {Promise<boolean>} True se l'aggiornamento è riuscito, false altrimenti
+     */
+    async updateTransactionsStatus(batchId, status, error = null) {
+        try {
+            // Usa prepared statement per prevenire SQL injection
+            await this.preparedStatements.updateTransactionsStatus.run(
+                status,
+                Date.now(),
+                error,
+                batchId
+            );
+            
+            return true;
+        } catch (error) {
+            console.error('Errore durante l\'aggiornamento dello stato delle transazioni:', error);
+            this.errorManager.handleError('database', error);
+            return false;
+        }
+    }
+
+    /**
+     * Aggiunge una transazione al sequencer
+     * @param {Object} transaction - La transazione da aggiungere
+     * @returns {Promise<Object>} Il risultato dell'operazione
+     */
+    async addTransaction(transaction) {
+        try {
+            // Valida la transazione
+            this.validateTransaction(transaction);
+            
+            // Sanitizza gli input
+            const sanitizedTransaction = this.sanitizeTransaction(transaction);
+            
+            // Verifica se la transazione è già stata elaborata (cache)
+            const transactionHash = this.hashTransaction(sanitizedTransaction).toString('hex');
+            if (this.transactionCache.has(transactionHash)) {
+                return {
+                    success: false,
+                    error: 'Transazione duplicata',
+                };
+            }
+            
+            // Aggiungi la transazione alla cache
+            this.transactionCache.set(transactionHash, true);
+            
+            // Limita la dimensione della cache
+            if (this.transactionCache.size > this.MAX_CACHE_SIZE) {
+                const oldestKey = this.transactionCache.keys().next().value;
+                this.transactionCache.delete(oldestKey);
+            }
+            
+            // Inserisci la transazione nel database usando prepared statement
+            const result = await this.preparedStatements.insertTransaction.run(
+                sanitizedTransaction.sender,
+                sanitizedTransaction.recipient,
+                sanitizedTransaction.amount,
+                sanitizedTransaction.nonce,
+                sanitizedTransaction.expiry_timestamp,
+                sanitizedTransaction.transaction_type,
+                sanitizedTransaction.data,
+                sanitizedTransaction.signature,
+                0, // status: 0 = in sospeso
+                Date.now()
+            );
+            
+            return {
+                success: true,
+                id: result.lastID,
+                message: 'Transazione aggiunta con successo',
+            };
+        } catch (error) {
+            console.error('Errore durante l\'aggiunta della transazione:', error);
+            this.errorManager.handleError('transaction_validation', error);
+            
+            return {
+                success: false,
+                error: error.message,
+            };
+        }
+    }
+
+    /**
+     * Valida una transazione
+     * @param {Object} transaction - La transazione da validare
+     * @throws {Error} Se la transazione non è valida
+     */
+    validateTransaction(transaction) {
+        // Verifica che tutti i campi obbligatori siano presenti
+        if (!transaction.sender) {
+            throw new Error('Il campo sender è obbligatorio');
+        }
+        
+        if (!transaction.recipient) {
+            throw new Error('Il campo recipient è obbligatorio');
+        }
+        
+        if (typeof transaction.amount !== 'number' || transaction.amount <= 0) {
+            throw new Error('Il campo amount deve essere un numero positivo');
+        }
+        
+        if (typeof transaction.nonce !== 'number' || transaction.nonce < 0) {
+            throw new Error('Il campo nonce deve essere un numero non negativo');
+        }
+        
+        if (typeof transaction.expiry_timestamp !== 'number' || transaction.expiry_timestamp <= 0) {
+            throw new Error('Il campo expiry_timestamp deve essere un timestamp valido');
+        }
+        
+        if (typeof transaction.transaction_type !== 'number') {
+            throw new Error('Il campo transaction_type deve essere un numero');
+        }
+        
+        // Verifica che la transazione non sia scaduta
+        if (transaction.expiry_timestamp < Date.now()) {
+            throw new Error('La transazione è scaduta');
+        }
+        
+        // Verifica che la firma sia presente
+        if (!transaction.signature) {
+            throw new Error('Il campo signature è obbligatorio');
+        }
+    }
+
+    /**
+     * Sanitizza una transazione
+     * @param {Object} transaction - La transazione da sanitizzare
+     * @returns {Object} La transazione sanitizzata
+     */
+    sanitizeTransaction(transaction) {
+        // Crea una copia della transazione
+        const sanitized = { ...transaction };
+        
+        // Sanitizza i campi stringa
+        if (typeof sanitized.sender === 'string') {
+            sanitized.sender = sanitized.sender.trim();
+        }
+        
+        if (typeof sanitized.recipient === 'string') {
+            sanitized.recipient = sanitized.recipient.trim();
+        }
+        
+        // Converti i campi numerici
+        sanitized.amount = Number(sanitized.amount);
+        sanitized.nonce = Number(sanitized.nonce);
+        sanitized.expiry_timestamp = Number(sanitized.expiry_timestamp);
+        sanitized.transaction_type = Number(sanitized.transaction_type);
+        
+        return sanitized;
     }
 
     /**
@@ -804,389 +1111,24 @@ class Sequencer {
     }
 
     /**
-     * Recupera le transazioni in sospeso
-     * @returns {Promise<Array>} Le transazioni in sospeso
-     */
-    async getPendingTransactions() {
-        try {
-            const transactions = await this.db.all(`
-                SELECT * FROM transactions 
-                WHERE status = 0 
-                ORDER BY created_at ASC 
-                LIMIT ?
-            `, [this.config.batchSize]);
-            
-            return transactions;
-        } catch (error) {
-            console.error('Errore durante il recupero delle transazioni in sospeso:', error);
-            this.errorManager.handleError('database', error);
-            return [];
-        }
-    }
-
-    /**
-     * Crea un batch di transazioni
-     * @param {Array} transactions - Le transazioni da includere nel batch
-     * @returns {Promise<Object>} Il batch creato
-     */
-    async createBatch(transactions) {
-        try {
-            // Crea un albero di Merkle delle transazioni
-            const merkleTree = new MerkleTree(transactions.map(tx => this.hashTransaction(tx)));
-            const merkleRoot = merkleTree.getRoot().toString('hex');
-            
-            // Inserisci il batch nel database
-            const result = await this.db.run(`
-                INSERT INTO batches (merkle_root, transaction_count, status, created_at)
-                VALUES (?, ?, ?, ?)
-            `, [merkleRoot, transactions.length, 0, Date.now()]);
-            
-            const batchId = result.lastID;
-            
-            // Aggiorna le transazioni con il batch ID
-            await this.db.run(`
-                UPDATE transactions
-                SET batch_id = ?
-                WHERE id IN (${transactions.map(tx => tx.id).join(',')})
-            `, [batchId]);
-            
-            return {
-                id: batchId,
-                merkleRoot,
-                transactions,
-                merkleTree,
-            };
-        } catch (error) {
-            console.error('Errore durante la creazione del batch:', error);
-            this.errorManager.handleError('database', error);
-            throw error;
-        }
-    }
-
-    /**
-     * Calcola l'hash di una transazione
-     * @param {Object} transaction - La transazione
-     * @returns {Buffer} L'hash della transazione
-     */
-    hashTransaction(transaction) {
-        const data = Buffer.concat([
-            Buffer.from(transaction.sender),
-            Buffer.from(transaction.recipient),
-            Buffer.from(transaction.amount.toString()),
-            Buffer.from(transaction.nonce.toString()),
-            Buffer.from(transaction.expiry_timestamp.toString()),
-            Buffer.from(transaction.transaction_type.toString()),
-            transaction.data || Buffer.from([]),
-        ]);
-        
-        return crypto.createHash('sha256').update(data).digest();
-    }
-
-    /**
-     * Ottiene l'indice del prossimo worker disponibile
-     * @returns {number} L'indice del worker
-     */
-    getNextWorkerIndex() {
-        // Implementazione semplice: round-robin
-        this._lastWorkerIndex = (this._lastWorkerIndex || -1) + 1;
-        if (this._lastWorkerIndex >= this.workers.length) {
-            this._lastWorkerIndex = 0;
-        }
-        return this._lastWorkerIndex;
-    }
-
-    /**
-     * Aggiorna lo stato delle transazioni
-     * @param {number} batchId - L'ID del batch
-     * @param {number} status - Il nuovo stato (1 = elaborata, 2 = errore)
-     * @param {string} error - L'errore (opzionale)
-     * @returns {Promise<boolean>} True se l'aggiornamento è riuscito, false altrimenti
-     */
-    async updateTransactionsStatus(batchId, status, error = null) {
-        try {
-            await this.db.run(`
-                UPDATE transactions
-                SET status = ?, processed_at = ?, error = ?
-                WHERE batch_id = ?
-            `, [status, Date.now(), error, batchId]);
-            
-            return true;
-        } catch (error) {
-            console.error('Errore durante l\'aggiornamento dello stato delle transazioni:', error);
-            this.errorManager.handleError('database', error);
-            return false;
-        }
-    }
-
-    /**
-     * Aggiunge una transazione al sequencer
-     * @param {Object} transaction - La transazione da aggiungere
-     * @returns {Promise<Object>} Il risultato dell'operazione
-     */
-    async addTransaction(transaction) {
-        try {
-            // Valida la transazione
-            this.validateTransaction(transaction);
-            
-            // Sanitizza gli input
-            const sanitizedTransaction = this.sanitizeTransaction(transaction);
-            
-            // Verifica se la transazione è già stata elaborata (cache)
-            const transactionHash = this.hashTransaction(sanitizedTransaction).toString('hex');
-            if (this.transactionCache.has(transactionHash)) {
-                return {
-                    success: false,
-                    error: 'Transazione duplicata',
-                };
-            }
-            
-            // Aggiungi la transazione alla cache
-            this.transactionCache.set(transactionHash, true);
-            
-            // Limita la dimensione della cache
-            if (this.transactionCache.size > this.MAX_CACHE_SIZE) {
-                const oldestKey = this.transactionCache.keys().next().value;
-                this.transactionCache.delete(oldestKey);
-            }
-            
-            // Inserisci la transazione nel database
-            const result = await this.db.run(`
-                INSERT INTO transactions (
-                    sender, recipient, amount, nonce, expiry_timestamp, 
-                    transaction_type, data, signature, status, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `, [
-                sanitizedTransaction.sender,
-                sanitizedTransaction.recipient,
-                sanitizedTransaction.amount,
-                sanitizedTransaction.nonce,
-                sanitizedTransaction.expiry_timestamp,
-                sanitizedTransaction.transaction_type,
-                sanitizedTransaction.data,
-                sanitizedTransaction.signature,
-                0, // status: 0 = in sospeso
-                Date.now(),
-            ]);
-            
-            return {
-                success: true,
-                id: result.lastID,
-                message: 'Transazione aggiunta con successo',
-            };
-        } catch (error) {
-            console.error('Errore durante l\'aggiunta della transazione:', error);
-            this.errorManager.handleError('transaction_validation', error);
-            
-            return {
-                success: false,
-                error: error.message,
-            };
-        }
-    }
-
-    /**
-     * Valida una transazione
-     * @param {Object} transaction - La transazione da validare
-     * @throws {Error} Se la transazione non è valida
-     */
-    validateTransaction(transaction) {
-        // Verifica che tutti i campi obbligatori siano presenti
-        if (!transaction.sender) {
-            throw new Error('Il campo sender è obbligatorio');
-        }
-        
-        if (!transaction.recipient) {
-            throw new Error('Il campo recipient è obbligatorio');
-        }
-        
-        if (transaction.sender === transaction.recipient) {
-            throw new Error('Il mittente e il destinatario non possono essere uguali');
-        }
-        
-        // Verifica che l'importo sia un numero positivo
-        if (typeof transaction.amount !== 'number' || isNaN(transaction.amount) || transaction.amount <= 0) {
-            throw new Error('L\'importo deve essere un numero positivo');
-        }
-        
-        // Verifica che il nonce sia un numero positivo
-        if (typeof transaction.nonce !== 'number' || isNaN(transaction.nonce) || transaction.nonce < 0) {
-            throw new Error('Il nonce deve essere un numero non negativo');
-        }
-        
-        // Verifica che il timestamp di scadenza sia nel futuro
-        if (typeof transaction.expiry_timestamp !== 'number' || isNaN(transaction.expiry_timestamp) || transaction.expiry_timestamp <= Date.now()) {
-            throw new Error('Il timestamp di scadenza deve essere nel futuro');
-        }
-        
-        // Verifica che il tipo di transazione sia valido
-        if (typeof transaction.transaction_type !== 'number' || isNaN(transaction.transaction_type) || transaction.transaction_type < 0) {
-            throw new Error('Il tipo di transazione non è valido');
-        }
-        
-        // Verifica che i dati siano un Buffer o null
-        if (transaction.data !== undefined && transaction.data !== null && !Buffer.isBuffer(transaction.data)) {
-            throw new Error('I dati devono essere un Buffer o null');
-        }
-        
-        // Verifica che la firma sia un Buffer o null
-        if (transaction.signature !== undefined && transaction.signature !== null && !Buffer.isBuffer(transaction.signature)) {
-            throw new Error('La firma deve essere un Buffer o null');
-        }
-    }
-
-    /**
-     * Sanitizza una transazione
-     * @param {Object} transaction - La transazione da sanitizzare
-     * @returns {Object} La transazione sanitizzata
-     */
-    sanitizeTransaction(transaction) {
-        return {
-            sender: this.sanitizeString(transaction.sender),
-            recipient: this.sanitizeString(transaction.recipient),
-            amount: Math.floor(transaction.amount), // Converti in intero
-            nonce: Math.floor(transaction.nonce), // Converti in intero
-            expiry_timestamp: Math.floor(transaction.expiry_timestamp), // Converti in intero
-            transaction_type: Math.floor(transaction.transaction_type), // Converti in intero
-            data: transaction.data || null,
-            signature: transaction.signature || null,
-        };
-    }
-
-    /**
-     * Sanitizza una stringa
-     * @param {string} str - La stringa da sanitizzare
-     * @returns {string} La stringa sanitizzata
-     */
-    sanitizeString(str) {
-        if (typeof str !== 'string') {
-            return String(str);
-        }
-        
-        // Rimuovi caratteri speciali e limita la lunghezza
-        return str.replace(/[^\w\s.-]/g, '').substring(0, 1000);
-    }
-
-    /**
-     * Firma un messaggio utilizzando l'HSM
-     * @param {Buffer|string} message - Il messaggio da firmare
-     * @param {string} [keyId] - ID opzionale della chiave da utilizzare
-     * @returns {Promise<Buffer>} La firma generata
-     */
-    async signMessage(message, keyId) {
-        try {
-            // Incrementa il contatore delle operazioni HSM
-            this.metrics.hsmOperations++;
-            
-            // Utilizza il key manager per firmare il messaggio
-            const signature = await this.keyManager.sign(message, keyId);
-            
-            // Registra l'evento HSM
-            await this.logHsmEvent('MESSAGE_SIGNED', {
-                messageHash: crypto.createHash('sha256').update(Buffer.isBuffer(message) ? message : Buffer.from(message)).digest('hex'),
-                keyId
-            });
-            
-            return signature;
-        } catch (error) {
-            console.error('Errore durante la firma del messaggio:', error);
-            
-            // Registra l'evento HSM
-            await this.logHsmEvent('MESSAGE_SIGNING_ERROR', {
-                error: error.message,
-                keyId
-            });
-            
-            throw error;
-        }
-    }
-
-    /**
-     * Verifica una firma utilizzando l'HSM
-     * @param {Buffer|string} message - Il messaggio originale
-     * @param {Buffer|string} signature - La firma da verificare
-     * @param {string} [keyId] - ID opzionale della chiave da utilizzare
-     * @returns {Promise<boolean>} True se la firma è valida, false altrimenti
-     */
-    async verifySignature(message, signature, keyId) {
-        try {
-            // Incrementa il contatore delle operazioni HSM
-            this.metrics.hsmOperations++;
-            
-            // Utilizza il key manager per verificare la firma
-            const isValid = await this.keyManager.verify(message, signature, keyId);
-            
-            // Registra l'evento HSM
-            await this.logHsmEvent('SIGNATURE_VERIFIED', {
-                messageHash: crypto.createHash('sha256').update(Buffer.isBuffer(message) ? message : Buffer.from(message)).digest('hex'),
-                isValid,
-                keyId
-            });
-            
-            return isValid;
-        } catch (error) {
-            console.error('Errore durante la verifica della firma:', error);
-            
-            // Registra l'evento HSM
-            await this.logHsmEvent('SIGNATURE_VERIFICATION_ERROR', {
-                error: error.message,
-                keyId
-            });
-            
-            throw error;
-        }
-    }
-
-    /**
      * Registra un evento HSM nel database
-     * @param {string} eventType - Tipo di evento
-     * @param {Object} eventData - Dati dell'evento
-     * @returns {Promise<boolean>} True se l'evento è stato registrato con successo, false altrimenti
+     * @param {string} eventType - Il tipo di evento
+     * @param {Object} eventData - I dati dell'evento
+     * @returns {Promise<boolean>} True se l'inserimento è riuscito, false altrimenti
      */
-    async logHsmEvent(eventType, eventData = {}) {
+    async logHsmEvent(eventType, eventData) {
         try {
-            await this.db.run(`
-                INSERT INTO hsm_events (event_type, event_data, created_at)
-                VALUES (?, ?, ?)
-            `, [
+            // Usa prepared statement per prevenire SQL injection
+            await this.preparedStatements.insertHsmEvent.run(
                 eventType,
                 JSON.stringify(eventData),
                 Date.now()
-            ]);
+            );
             
             return true;
         } catch (error) {
             console.error('Errore durante la registrazione dell\'evento HSM:', error);
             return false;
-        }
-    }
-
-    /**
-     * Ottiene lo stato dell'HSM
-     * @returns {Promise<Object>} Lo stato dell'HSM
-     */
-    async getHsmStatus() {
-        try {
-            // Se il key manager supporta il metodo getStatus, utilizzalo
-            if (this.keyManager && typeof this.keyManager.getStatus === 'function') {
-                return this.keyManager.getStatus();
-            }
-            
-            // Altrimenti, restituisci uno stato di base
-            return {
-                currentProvider: this.metrics.hsmStatus,
-                failoverCount: this.metrics.hsmFailovers,
-                keyRotations: this.metrics.keyRotations,
-                lastKeyRotation: this.metrics.lastKeyRotation,
-                nextKeyRotation: this.metrics.nextKeyRotation,
-                operations: this.metrics.hsmOperations
-            };
-        } catch (error) {
-            console.error('Errore durante il recupero dello stato dell\'HSM:', error);
-            return {
-                error: error.message,
-                status: 'error'
-            };
         }
     }
 }

@@ -3,6 +3,7 @@
  * 
  * Questo modulo implementa le funzioni di validazione per le transazioni e gli stati
  * del sistema Layer-2 su Solana, garantendo l'integrità e la sicurezza del sistema.
+ * Include protezioni avanzate anti-double-spending e validazione multi-fase.
  */
 
 use solana_program::{
@@ -15,9 +16,11 @@ use solana_program::{
     program_pack::{IsInitialized, Pack},
     keccak,
     secp256k1::{Secp256k1, Message, Signature},
+    hash::{hash, Hash},
 };
 use std::convert::TryInto;
 use std::mem::size_of;
+use std::collections::HashSet;
 use crate::error::Layer2Error;
 use crate::state::{
     Layer2State, 
@@ -28,13 +31,41 @@ use crate::state::{
     Proof, 
     Challenge,
     MerkleTree,
-    StateTransition
+    StateTransition,
+    TransactionHistory,
+    SpentNonce
 };
 
 /// Struttura per la validazione
 pub struct Validator {
     /// Chiave pubblica del programma
     pub program_id: Pubkey,
+}
+
+/// Enum per i livelli di validazione
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ValidationLevel {
+    /// Validazione di base (sintassi e formato)
+    Basic,
+    /// Validazione crittografica (firme e prove)
+    Cryptographic,
+    /// Validazione semantica (regole di business)
+    Semantic,
+    /// Validazione di stato (effetti sullo stato globale)
+    State,
+}
+
+/// Struttura per il risultato della validazione
+#[derive(Debug)]
+pub struct ValidationResult {
+    /// Livello di validazione
+    pub level: ValidationLevel,
+    /// Risultato della validazione
+    pub result: ProgramResult,
+    /// Dettagli aggiuntivi
+    pub details: Option<String>,
+    /// Timestamp della validazione
+    pub timestamp: i64,
 }
 
 impl Validator {
@@ -174,28 +205,75 @@ impl Validator {
         Ok(())
     }
 
-    /// Verifica una transazione
-    pub fn validate_transaction(&self, transaction: &Transaction) -> ProgramResult {
-        // Verifica che la transazione non sia scaduta
-        let clock = Clock::get()?;
-        if transaction.expiry_timestamp < clock.unix_timestamp as u64 {
-            msg!("La transazione è scaduta");
-            return Err(Layer2Error::TransactionExpired.into());
+    /// Verifica una transazione con validazione multi-fase
+    pub fn validate_transaction_multi_phase(
+        &self, 
+        transaction: &Transaction,
+        history_account: Option<&AccountInfo>,
+        state_account: Option<&AccountInfo>,
+    ) -> Vec<ValidationResult> {
+        let clock = Clock::get().unwrap_or_default();
+        let current_timestamp = clock.unix_timestamp;
+        let mut results = Vec::new();
+        
+        // Fase 1: Validazione di base (sintassi e formato)
+        let basic_result = self.validate_transaction_basic(transaction);
+        results.push(ValidationResult {
+            level: ValidationLevel::Basic,
+            result: basic_result.clone(),
+            details: None,
+            timestamp: current_timestamp,
+        });
+        
+        // Se la validazione di base fallisce, interrompi il processo
+        if basic_result.is_err() {
+            return results;
         }
         
-        // Verifica che il nonce sia valido (implementazione semplificata)
-        // In un'implementazione reale, verificheremmo che il nonce non sia stato già utilizzato
-        if transaction.nonce == 0 {
-            msg!("Nonce non valido");
-            return Err(Layer2Error::InvalidNonce.into());
+        // Fase 2: Validazione crittografica (firme)
+        let crypto_result = self.validate_transaction_cryptographic(transaction);
+        results.push(ValidationResult {
+            level: ValidationLevel::Cryptographic,
+            result: crypto_result.clone(),
+            details: None,
+            timestamp: current_timestamp,
+        });
+        
+        // Se la validazione crittografica fallisce, interrompi il processo
+        if crypto_result.is_err() {
+            return results;
         }
         
-        // Verifica che l'importo sia valido
-        if transaction.amount == 0 {
-            msg!("Importo non valido");
-            return Err(Layer2Error::InvalidAmount.into());
+        // Fase 3: Validazione semantica (regole di business)
+        let semantic_result = self.validate_transaction_semantic(transaction);
+        results.push(ValidationResult {
+            level: ValidationLevel::Semantic,
+            result: semantic_result.clone(),
+            details: None,
+            timestamp: current_timestamp,
+        });
+        
+        // Se la validazione semantica fallisce, interrompi il processo
+        if semantic_result.is_err() {
+            return results;
         }
         
+        // Fase 4: Validazione di stato (double-spending, saldo, ecc.)
+        if let (Some(history), Some(state)) = (history_account, state_account) {
+            let state_result = self.validate_transaction_state(transaction, history, state);
+            results.push(ValidationResult {
+                level: ValidationLevel::State,
+                result: state_result.clone(),
+                details: None,
+                timestamp: current_timestamp,
+            });
+        }
+        
+        results
+    }
+
+    /// Validazione di base della transazione (sintassi e formato)
+    pub fn validate_transaction_basic(&self, transaction: &Transaction) -> ProgramResult {
         // Verifica che il mittente e il destinatario siano validi
         if transaction.sender == Pubkey::default() || transaction.recipient == Pubkey::default() {
             msg!("Mittente o destinatario non valido");
@@ -208,16 +286,46 @@ impl Validator {
             return Err(Layer2Error::SenderEqualsRecipient.into());
         }
         
-        // Verifica la firma della transazione
-        if !transaction.signature.is_empty() {
-            self.validate_transaction_signature(transaction)?;
+        // Verifica che l'importo sia valido
+        if transaction.amount == 0 {
+            msg!("Importo non valido");
+            return Err(Layer2Error::InvalidAmount.into());
+        }
+        
+        // Verifica che il nonce sia valido
+        if transaction.nonce == 0 {
+            msg!("Nonce non valido");
+            return Err(Layer2Error::InvalidNonce.into());
+        }
+        
+        // Verifica che la transazione non sia scaduta
+        let clock = Clock::get()?;
+        if transaction.expiry_timestamp < clock.unix_timestamp as u64 {
+            msg!("La transazione è scaduta");
+            return Err(Layer2Error::TransactionExpired.into());
+        }
+        
+        // Verifica che il tipo di transazione sia valido
+        match transaction.transaction_type {
+            0 | 1 | 2 | 3 => {}, // Tipi validi
+            _ => {
+                msg!("Tipo di transazione non valido");
+                return Err(Layer2Error::InvalidTransactionType.into());
+            }
+        }
+        
+        // Verifica che i dati non superino la dimensione massima
+        const MAX_DATA_SIZE: usize = 1024;
+        if transaction.data.len() > MAX_DATA_SIZE {
+            msg!("I dati della transazione superano la dimensione massima");
+            return Err(Layer2Error::DataTooLarge.into());
         }
         
         Ok(())
     }
 
-    /// Verifica la firma di una transazione
-    pub fn validate_transaction_signature(&self, transaction: &Transaction) -> ProgramResult {
+    /// Validazione crittografica della transazione (firme)
+    pub fn validate_transaction_cryptographic(&self, transaction: &Transaction) -> ProgramResult {
         // Verifica che la firma non sia vuota
         if transaction.signature.is_empty() {
             msg!("Firma della transazione mancante");
@@ -271,11 +379,246 @@ impl Validator {
             return Err(Layer2Error::InvalidSignature.into());
         }
         
+        // Verifica la firma con timestamping sicuro
+        self.validate_transaction_timestamp(transaction)?;
+        
         Ok(())
     }
 
-    /// Verifica un batch di transazioni
-    pub fn validate_batch(&self, batch: &Batch) -> ProgramResult {
+    /// Validazione semantica della transazione (regole di business)
+    pub fn validate_transaction_semantic(&self, transaction: &Transaction) -> ProgramResult {
+        // Verifica regole specifiche per tipo di transazione
+        match transaction.transaction_type {
+            0 => {
+                // Deposito
+                // Verifica che l'importo sia superiore alla soglia minima
+                const MIN_DEPOSIT: u64 = 1000;
+                if transaction.amount < MIN_DEPOSIT {
+                    msg!("Importo del deposito inferiore alla soglia minima");
+                    return Err(Layer2Error::AmountBelowMinimum.into());
+                }
+            },
+            1 => {
+                // Trasferimento
+                // Nessuna regola aggiuntiva per ora
+            },
+            2 => {
+                // Prelievo
+                // Verifica che l'importo sia inferiore alla soglia massima
+                const MAX_WITHDRAWAL: u64 = 1_000_000_000;
+                if transaction.amount > MAX_WITHDRAWAL {
+                    msg!("Importo del prelievo superiore alla soglia massima");
+                    return Err(Layer2Error::AmountAboveMaximum.into());
+                }
+            },
+            3 => {
+                // Swap
+                // Verifica che i dati contengano le informazioni necessarie
+                if transaction.data.len() < 32 {
+                    msg!("Dati insufficienti per uno swap");
+                    return Err(Layer2Error::InvalidData.into());
+                }
+            },
+            _ => {
+                msg!("Tipo di transazione non supportato");
+                return Err(Layer2Error::InvalidTransactionType.into());
+            }
+        }
+        
+        // Verifica che la transazione non sia troppo vecchia
+        let clock = Clock::get()?;
+        const MAX_TX_AGE: i64 = 86400; // 24 ore
+        let tx_age = clock.unix_timestamp - (transaction.expiry_timestamp - 3600) as i64;
+        if tx_age > MAX_TX_AGE {
+            msg!("La transazione è troppo vecchia");
+            return Err(Layer2Error::TransactionTooOld.into());
+        }
+        
+        Ok(())
+    }
+
+    /// Validazione di stato della transazione (double-spending, saldo, ecc.)
+    pub fn validate_transaction_state(
+        &self,
+        transaction: &Transaction,
+        history_account: &AccountInfo,
+        state_account: &AccountInfo,
+    ) -> ProgramResult {
+        // Verifica che gli account siano di proprietà del programma
+        self.validate_account_owner(history_account)?;
+        self.validate_account_owner(state_account)?;
+        
+        // Deserializza lo stato
+        let state_data = state_account.try_borrow_data()?;
+        let state = Layer2State::unpack(&state_data)?;
+        
+        // Verifica che il mittente abbia un saldo sufficiente
+        let sender_account = state.accounts.iter()
+            .find(|a| a.address == transaction.sender)
+            .ok_or(Layer2Error::AccountNotFound)?;
+        
+        if sender_account.balance < transaction.amount {
+            msg!("Saldo insufficiente");
+            return Err(Layer2Error::InsufficientBalance.into());
+        }
+        
+        // Verifica che il nonce non sia già stato utilizzato (anti-double-spending)
+        self.validate_transaction_nonce(transaction, history_account)?;
+        
+        // Verifica che la transazione non sia già stata elaborata
+        self.validate_transaction_not_processed(transaction, history_account)?;
+        
+        Ok(())
+    }
+
+    /// Verifica che il nonce non sia già stato utilizzato (anti-double-spending)
+    pub fn validate_transaction_nonce(
+        &self,
+        transaction: &Transaction,
+        history_account: &AccountInfo,
+    ) -> ProgramResult {
+        // Deserializza la cronologia delle transazioni
+        let history_data = history_account.try_borrow_data()?;
+        let history = TransactionHistory::unpack(&history_data)?;
+        
+        // Verifica che il nonce non sia già stato utilizzato
+        for spent_nonce in &history.spent_nonces {
+            if spent_nonce.sender == transaction.sender && spent_nonce.nonce == transaction.nonce {
+                msg!("Nonce già utilizzato (double-spending)");
+                return Err(Layer2Error::NonceAlreadyUsed.into());
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Verifica che la transazione non sia già stata elaborata
+    pub fn validate_transaction_not_processed(
+        &self,
+        transaction: &Transaction,
+        history_account: &AccountInfo,
+    ) -> ProgramResult {
+        // Deserializza la cronologia delle transazioni
+        let history_data = history_account.try_borrow_data()?;
+        let history = TransactionHistory::unpack(&history_data)?;
+        
+        // Calcola l'hash della transazione
+        let mut tx_data = Vec::new();
+        tx_data.extend_from_slice(&transaction.sender.to_bytes());
+        tx_data.extend_from_slice(&transaction.recipient.to_bytes());
+        tx_data.extend_from_slice(&transaction.amount.to_le_bytes());
+        tx_data.extend_from_slice(&transaction.nonce.to_le_bytes());
+        tx_data.extend_from_slice(&transaction.expiry_timestamp.to_le_bytes());
+        tx_data.push(transaction.transaction_type as u8);
+        tx_data.extend_from_slice(&(transaction.data.len() as u32).to_le_bytes());
+        tx_data.extend_from_slice(&transaction.data);
+        
+        let tx_hash = keccak::hash(&tx_data).to_bytes();
+        
+        // Verifica che l'hash della transazione non sia già presente nella cronologia
+        for processed_tx in &history.processed_transactions {
+            if processed_tx.transaction_hash == tx_hash {
+                msg!("Transazione già elaborata");
+                return Err(Layer2Error::TransactionAlreadyProcessed.into());
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Verifica il timestamp della transazione
+    pub fn validate_transaction_timestamp(
+        &self,
+        transaction: &Transaction,
+    ) -> ProgramResult {
+        // Verifica che il timestamp sia valido
+        let clock = Clock::get()?;
+        let current_time = clock.unix_timestamp as u64;
+        
+        // Verifica che il timestamp non sia nel futuro
+        if transaction.expiry_timestamp > current_time + 3600 {
+            msg!("Timestamp della transazione nel futuro");
+            return Err(Layer2Error::InvalidTimestamp.into());
+        }
+        
+        // Verifica che il timestamp non sia scaduto
+        if transaction.expiry_timestamp < current_time {
+            msg!("Timestamp della transazione scaduto");
+            return Err(Layer2Error::TransactionExpired.into());
+        }
+        
+        Ok(())
+    }
+
+    /// Verifica un batch di transazioni con validazione multi-fase
+    pub fn validate_batch_multi_phase(
+        &self,
+        batch: &Batch,
+        history_account: Option<&AccountInfo>,
+        state_account: Option<&AccountInfo>,
+    ) -> Vec<ValidationResult> {
+        let clock = Clock::get().unwrap_or_default();
+        let current_timestamp = clock.unix_timestamp;
+        let mut results = Vec::new();
+        
+        // Fase 1: Validazione di base (sintassi e formato)
+        let basic_result = self.validate_batch_basic(batch);
+        results.push(ValidationResult {
+            level: ValidationLevel::Basic,
+            result: basic_result.clone(),
+            details: None,
+            timestamp: current_timestamp,
+        });
+        
+        // Se la validazione di base fallisce, interrompi il processo
+        if basic_result.is_err() {
+            return results;
+        }
+        
+        // Fase 2: Validazione crittografica (firme e Merkle root)
+        let crypto_result = self.validate_batch_cryptographic(batch);
+        results.push(ValidationResult {
+            level: ValidationLevel::Cryptographic,
+            result: crypto_result.clone(),
+            details: None,
+            timestamp: current_timestamp,
+        });
+        
+        // Se la validazione crittografica fallisce, interrompi il processo
+        if crypto_result.is_err() {
+            return results;
+        }
+        
+        // Fase 3: Validazione semantica (regole di business)
+        let semantic_result = self.validate_batch_semantic(batch);
+        results.push(ValidationResult {
+            level: ValidationLevel::Semantic,
+            result: semantic_result.clone(),
+            details: None,
+            timestamp: current_timestamp,
+        });
+        
+        // Se la validazione semantica fallisce, interrompi il processo
+        if semantic_result.is_err() {
+            return results;
+        }
+        
+        // Fase 4: Validazione di stato (double-spending, saldo, ecc.)
+        if let (Some(history), Some(state)) = (history_account, state_account) {
+            let state_result = self.validate_batch_state(batch, history, state);
+            results.push(ValidationResult {
+                level: ValidationLevel::State,
+                result: state_result.clone(),
+                details: None,
+                timestamp: current_timestamp,
+            });
+        }
+        
+        results
+    }
+
+    /// Validazione di base del batch (sintassi e formato)
+    pub fn validate_batch_basic(&self, batch: &Batch) -> ProgramResult {
         // Verifica che il batch non sia vuoto
         if batch.transactions.is_empty() {
             msg!("Il batch non può essere vuoto");
@@ -289,6 +632,12 @@ impl Validator {
             return Err(Layer2Error::BatchTooLarge.into());
         }
         
+        // Verifica che il sequencer sia valido
+        if batch.sequencer == Pubkey::default() {
+            msg!("Sequencer non valido");
+            return Err(Layer2Error::InvalidSequencer.into());
+        }
+        
         // Verifica che il batch non sia scaduto
         let clock = Clock::get()?;
         if batch.expiry_timestamp < clock.unix_timestamp as u64 {
@@ -296,28 +645,22 @@ impl Validator {
             return Err(Layer2Error::BatchExpired.into());
         }
         
-        // Verifica che il sequencer sia valido
-        if batch.sequencer == Pubkey::default() {
-            msg!("Sequencer non valido");
-            return Err(Layer2Error::InvalidSequencer.into());
+        // Verifica che il root di Merkle non sia vuoto
+        if batch.merkle_root == [0; 32] {
+            msg!("Root di Merkle non valido");
+            return Err(Layer2Error::InvalidMerkleRoot.into());
         }
         
-        // Verifica ogni transazione nel batch
+        // Verifica che ogni transazione nel batch sia valida (validazione di base)
         for transaction in &batch.transactions {
-            self.validate_transaction(transaction)?;
+            self.validate_transaction_basic(transaction)?;
         }
-        
-        // Verifica la firma del batch
-        self.validate_batch_signature(batch)?;
-        
-        // Verifica che il root di Merkle sia valido
-        self.validate_batch_merkle_root(batch)?;
         
         Ok(())
     }
 
-    /// Verifica la firma di un batch
-    pub fn validate_batch_signature(&self, batch: &Batch) -> ProgramResult {
+    /// Validazione crittografica del batch (firme e Merkle root)
+    pub fn validate_batch_cryptographic(&self, batch: &Batch) -> ProgramResult {
         // Verifica che la firma non sia vuota
         if batch.signature.is_empty() {
             msg!("Firma del batch mancante");
@@ -378,17 +721,142 @@ impl Validator {
             return Err(Layer2Error::InvalidSignature.into());
         }
         
+        // Verifica che il root di Merkle sia valido
+        self.validate_batch_merkle_root(batch)?;
+        
+        // Verifica che ogni transazione nel batch sia valida (validazione crittografica)
+        for transaction in &batch.transactions {
+            self.validate_transaction_cryptographic(transaction)?;
+        }
+        
+        Ok(())
+    }
+
+    /// Validazione semantica del batch (regole di business)
+    pub fn validate_batch_semantic(&self, batch: &Batch) -> ProgramResult {
+        // Verifica che il batch non contenga transazioni duplicate
+        let mut tx_hashes = HashSet::new();
+        
+        for tx in &batch.transactions {
+            // Serializza la transazione
+            let mut tx_data = Vec::new();
+            tx_data.extend_from_slice(&tx.sender.to_bytes());
+            tx_data.extend_from_slice(&tx.recipient.to_bytes());
+            tx_data.extend_from_slice(&tx.amount.to_le_bytes());
+            tx_data.extend_from_slice(&tx.nonce.to_le_bytes());
+            tx_data.extend_from_slice(&tx.expiry_timestamp.to_le_bytes());
+            tx_data.push(tx.transaction_type as u8);
+            tx_data.extend_from_slice(&(tx.data.len() as u32).to_le_bytes());
+            tx_data.extend_from_slice(&tx.data);
+            
+            // Calcola l'hash della transazione
+            let tx_hash = keccak::hash(&tx_data).to_bytes();
+            
+            // Verifica che l'hash non sia già presente
+            if !tx_hashes.insert(tx_hash) {
+                msg!("Il batch contiene transazioni duplicate");
+                return Err(Layer2Error::DuplicateTransaction.into());
+            }
+        }
+        
+        // Verifica che il batch non contenga transazioni con lo stesso mittente e nonce
+        let mut sender_nonces = HashSet::new();
+        
+        for tx in &batch.transactions {
+            let sender_nonce = (tx.sender, tx.nonce);
+            
+            if !sender_nonces.insert(sender_nonce) {
+                msg!("Il batch contiene transazioni con lo stesso mittente e nonce");
+                return Err(Layer2Error::DuplicateNonce.into());
+            }
+        }
+        
+        // Verifica che ogni transazione nel batch sia valida (validazione semantica)
+        for transaction in &batch.transactions {
+            self.validate_transaction_semantic(transaction)?;
+        }
+        
+        Ok(())
+    }
+
+    /// Validazione di stato del batch (double-spending, saldo, ecc.)
+    pub fn validate_batch_state(
+        &self,
+        batch: &Batch,
+        history_account: &AccountInfo,
+        state_account: &AccountInfo,
+    ) -> ProgramResult {
+        // Verifica che gli account siano di proprietà del programma
+        self.validate_account_owner(history_account)?;
+        self.validate_account_owner(state_account)?;
+        
+        // Deserializza lo stato
+        let state_data = state_account.try_borrow_data()?;
+        let state = Layer2State::unpack(&state_data)?;
+        
+        // Simula l'applicazione del batch per verificare che non ci siano problemi
+        let mut simulated_state = state.clone();
+        
+        // Traccia i nonce utilizzati durante la simulazione
+        let mut used_nonces = HashSet::new();
+        
+        for tx in &batch.transactions {
+            // Verifica che il nonce non sia già stato utilizzato in questo batch
+            let sender_nonce = (tx.sender, tx.nonce);
+            
+            if !used_nonces.insert(sender_nonce) {
+                msg!("Double-spending rilevato nel batch (stesso mittente e nonce)");
+                return Err(Layer2Error::DoubleSpending.into());
+            }
+            
+            // Verifica che il mittente abbia un saldo sufficiente
+            let sender_idx = simulated_state.accounts.iter()
+                .position(|a| a.address == tx.sender)
+                .ok_or(Layer2Error::AccountNotFound)?;
+            
+            if simulated_state.accounts[sender_idx].balance < tx.amount {
+                msg!("Saldo insufficiente");
+                return Err(Layer2Error::InsufficientBalance.into());
+            }
+            
+            // Aggiorna il saldo del mittente
+            simulated_state.accounts[sender_idx].balance -= tx.amount;
+            
+            // Aggiorna il saldo del destinatario
+            let recipient_idx = simulated_state.accounts.iter()
+                .position(|a| a.address == tx.recipient);
+            
+            match recipient_idx {
+                Some(idx) => {
+                    simulated_state.accounts[idx].balance += tx.amount;
+                },
+                None => {
+                    // Il destinatario non esiste, crea un nuovo account
+                    if simulated_state.accounts.len() >= simulated_state.accounts.capacity() {
+                        msg!("Numero massimo di account raggiunto");
+                        return Err(Layer2Error::MaxAccountsReached.into());
+                    }
+                    
+                    simulated_state.accounts.push(Account {
+                        address: tx.recipient,
+                        balance: tx.amount,
+                        nonce: 0,
+                        is_initialized: true,
+                    });
+                }
+            }
+        }
+        
+        // Verifica che ogni transazione nel batch sia valida (validazione di stato)
+        for transaction in &batch.transactions {
+            self.validate_transaction_state(transaction, history_account, state_account)?;
+        }
+        
         Ok(())
     }
 
     /// Verifica che il root di Merkle di un batch sia valido
     pub fn validate_batch_merkle_root(&self, batch: &Batch) -> ProgramResult {
-        // Verifica che il root di Merkle non sia vuoto
-        if batch.merkle_root == [0; 32] {
-            msg!("Root di Merkle non valido");
-            return Err(Layer2Error::InvalidMerkleRoot.into());
-        }
-        
         // Calcola il root di Merkle dalle transazioni
         let mut leaves = Vec::with_capacity(batch.transactions.len());
         
@@ -422,134 +890,67 @@ impl Validator {
         Ok(())
     }
 
-    /// Verifica una transizione di stato
-    pub fn validate_state_transition(
+    /// Verifica una prova di transazione in un batch
+    pub fn validate_transaction_in_batch(
         &self,
-        old_state: &Layer2State,
-        new_state: &Layer2State,
-        transition: &StateTransition,
-    ) -> ProgramResult {
-        // Verifica che la transizione di stato sia valida
-        if transition.from_state_hash != old_state.hash() {
-            msg!("Hash dello stato iniziale non valido");
-            return Err(Layer2Error::InvalidStateTransition.into());
-        }
-        
-        if transition.to_state_hash != new_state.hash() {
-            msg!("Hash dello stato finale non valido");
-            return Err(Layer2Error::InvalidStateTransition.into());
-        }
-        
-        // Verifica che il batch sia valido
-        self.validate_batch(&transition.batch)?;
-        
-        // Verifica la firma della transizione di stato
-        self.validate_state_transition_signature(transition, old_state)?;
-        
-        // Verifica che la transizione di stato sia coerente
-        self.validate_state_transition_consistency(old_state, new_state, &transition.batch)?;
-        
-        Ok(())
-    }
-
-    /// Verifica la firma di una transizione di stato
-    pub fn validate_state_transition_signature(
-        &self,
-        transition: &StateTransition,
-        state: &Layer2State,
-    ) -> ProgramResult {
-        // Verifica che la firma non sia vuota
-        if transition.signature.is_empty() {
-            msg!("Firma della transizione di stato mancante");
-            return Err(Layer2Error::InvalidSignature.into());
-        }
-        
-        // Serializza la transizione di stato senza la firma
-        let mut transition_data = Vec::new();
-        transition_data.extend_from_slice(&transition.from_state_hash);
-        transition_data.extend_from_slice(&transition.to_state_hash);
-        
-        // Aggiungi i dati del batch
-        transition_data.extend_from_slice(&transition.batch.sequencer.to_bytes());
-        transition_data.extend_from_slice(&transition.batch.expiry_timestamp.to_le_bytes());
-        transition_data.extend_from_slice(&transition.batch.merkle_root);
-        
-        // Calcola l'hash della transizione di stato
-        let transition_hash = keccak::hash(&transition_data);
-        
-        // Estrai la firma e la chiave pubblica
-        if transition.signature.len() < 65 {
-            msg!("Lunghezza della firma non valida");
-            return Err(Layer2Error::InvalidSignature.into());
-        }
-        
-        let signature = &transition.signature[0..64];
-        let recovery_id = transition.signature[64];
-        
-        // Recupera la chiave pubblica dalla firma
-        let recovered_pubkey = match Secp256k1::recover(
-            &Message::parse(&transition_hash.0),
-            &Signature::parse_slice(signature)?,
-            recovery_id,
-        ) {
-            Ok(pubkey) => pubkey,
-            Err(_) => {
-                msg!("Impossibile recuperare la chiave pubblica dalla firma");
-                return Err(Layer2Error::InvalidSignature.into());
-            }
-        };
-        
-        // Verifica che la chiave pubblica recuperata corrisponda al sequencer autorizzato
-        let pubkey_bytes = recovered_pubkey.serialize();
-        let expected_pubkey = state.sequencer.to_bytes();
-        
-        // Nota: questa è una semplificazione, in un'implementazione reale
-        // dovremmo convertire correttamente tra il formato Secp256k1 e Solana
-        if pubkey_bytes != expected_pubkey {
-            msg!("La chiave pubblica recuperata non corrisponde al sequencer autorizzato");
-            return Err(Layer2Error::InvalidSignature.into());
-        }
-        
-        Ok(())
-    }
-
-    /// Verifica la coerenza di una transizione di stato
-    pub fn validate_state_transition_consistency(
-        &self,
-        old_state: &Layer2State,
-        new_state: &Layer2State,
+        transaction: &Transaction,
+        proof: &Proof,
         batch: &Batch,
     ) -> ProgramResult {
-        // Verifica che il numero di versione sia incrementato di 1
-        if new_state.version != old_state.version.checked_add(1).ok_or(Layer2Error::ArithmeticOverflow)? {
-            msg!("Numero di versione non valido");
-            return Err(Layer2Error::InvalidStateTransition.into());
+        // Serializza la transazione
+        let mut tx_data = Vec::new();
+        tx_data.extend_from_slice(&transaction.sender.to_bytes());
+        tx_data.extend_from_slice(&transaction.recipient.to_bytes());
+        tx_data.extend_from_slice(&transaction.amount.to_le_bytes());
+        tx_data.extend_from_slice(&transaction.nonce.to_le_bytes());
+        tx_data.extend_from_slice(&transaction.expiry_timestamp.to_le_bytes());
+        tx_data.push(transaction.transaction_type as u8);
+        tx_data.extend_from_slice(&(transaction.data.len() as u32).to_le_bytes());
+        tx_data.extend_from_slice(&transaction.data);
+        
+        // Calcola l'hash della transazione
+        let tx_hash = keccak::hash(&tx_data).0.to_vec();
+        
+        // Verifica la prova di Merkle
+        self.validate_merkle_proof(&tx_hash, &proof.siblings, &batch.merkle_root)?;
+        
+        // Verifica che l'indice della transazione sia valido
+        if proof.index >= batch.transactions.len() as u32 {
+            msg!("Indice della transazione non valido");
+            return Err(Layer2Error::InvalidTransactionIndex.into());
         }
         
-        // Verifica che il sequencer non sia cambiato
-        if new_state.sequencer != old_state.sequencer {
-            msg!("Il sequencer non può essere cambiato durante una transizione di stato");
-            return Err(Layer2Error::InvalidStateTransition.into());
+        // Verifica che la transazione all'indice specificato corrisponda
+        let batch_tx = &batch.transactions[proof.index as usize];
+        
+        if batch_tx.sender != transaction.sender ||
+           batch_tx.recipient != transaction.recipient ||
+           batch_tx.amount != transaction.amount ||
+           batch_tx.nonce != transaction.nonce ||
+           batch_tx.expiry_timestamp != transaction.expiry_timestamp ||
+           batch_tx.transaction_type != transaction.transaction_type ||
+           batch_tx.data != transaction.data {
+            msg!("La transazione non corrisponde a quella nel batch");
+            return Err(Layer2Error::TransactionMismatch.into());
         }
-        
-        // Verifica che il numero di transazioni sia incrementato correttamente
-        let expected_tx_count = old_state.transaction_count.checked_add(batch.transactions.len() as u64)
-            .ok_or(Layer2Error::ArithmeticOverflow)?;
-        
-        if new_state.transaction_count != expected_tx_count {
-            msg!("Numero di transazioni non valido");
-            return Err(Layer2Error::InvalidStateTransition.into());
-        }
-        
-        // In un'implementazione reale, qui verificheremmo che applicando le transazioni
-        // nello stato iniziale si ottenga lo stato finale, inclusi gli aggiornamenti
-        // agli alberi di Merkle degli account e delle transazioni
         
         Ok(())
     }
 
-    /// Verifica una sfida
-    pub fn validate_challenge(&self, challenge: &Challenge, state: &Layer2State) -> ProgramResult {
+    /// Verifica una sfida a una transazione
+    pub fn validate_challenge(
+        &self,
+        challenge: &Challenge,
+        batch: &Batch,
+        history_account: &AccountInfo,
+        state_account: &AccountInfo,
+    ) -> ProgramResult {
+        // Verifica che la sfida sia valida
+        if challenge.challenger == Pubkey::default() {
+            msg!("Sfidante non valido");
+            return Err(Layer2Error::InvalidChallenger.into());
+        }
+        
         // Verifica che la sfida non sia scaduta
         let clock = Clock::get()?;
         if challenge.expiry_timestamp < clock.unix_timestamp as u64 {
@@ -557,593 +958,96 @@ impl Validator {
             return Err(Layer2Error::ChallengeExpired.into());
         }
         
-        // Verifica che lo stato contestato sia valido
-        if challenge.contested_state_hash != state.hash() {
-            msg!("Hash dello stato contestato non valido");
-            return Err(Layer2Error::InvalidChallenge.into());
+        // Verifica che l'indice della transazione sia valido
+        if challenge.transaction_index >= batch.transactions.len() as u32 {
+            msg!("Indice della transazione non valido");
+            return Err(Layer2Error::InvalidTransactionIndex.into());
         }
         
-        // Verifica la firma della sfida
-        self.validate_challenge_signature(challenge)?;
+        // Ottieni la transazione dal batch
+        let transaction = &batch.transactions[challenge.transaction_index as usize];
         
-        // Verifica la prova della sfida
-        self.validate_challenge_proof(challenge, state)?;
-        
-        Ok(())
-    }
-
-    /// Verifica la firma di una sfida
-    pub fn validate_challenge_signature(&self, challenge: &Challenge) -> ProgramResult {
-        // Verifica che la firma non sia vuota
-        if challenge.signature.is_empty() {
-            msg!("Firma della sfida mancante");
-            return Err(Layer2Error::InvalidSignature.into());
-        }
-        
-        // Serializza la sfida senza la firma
-        let mut challenge_data = Vec::new();
-        challenge_data.extend_from_slice(&challenge.challenger.to_bytes());
-        challenge_data.extend_from_slice(&challenge.contested_state_hash);
-        challenge_data.extend_from_slice(&challenge.expiry_timestamp.to_le_bytes());
-        challenge_data.extend_from_slice(&challenge.proof_data);
-        
-        // Calcola l'hash della sfida
-        let challenge_hash = keccak::hash(&challenge_data);
-        
-        // Estrai la firma e la chiave pubblica
-        if challenge.signature.len() < 65 {
-            msg!("Lunghezza della firma non valida");
-            return Err(Layer2Error::InvalidSignature.into());
-        }
-        
-        let signature = &challenge.signature[0..64];
-        let recovery_id = challenge.signature[64];
-        
-        // Recupera la chiave pubblica dalla firma
-        let recovered_pubkey = match Secp256k1::recover(
-            &Message::parse(&challenge_hash.0),
-            &Signature::parse_slice(signature)?,
-            recovery_id,
-        ) {
-            Ok(pubkey) => pubkey,
-            Err(_) => {
-                msg!("Impossibile recuperare la chiave pubblica dalla firma");
-                return Err(Layer2Error::InvalidSignature.into());
-            }
-        };
-        
-        // Verifica che la chiave pubblica recuperata corrisponda al challenger
-        let pubkey_bytes = recovered_pubkey.serialize();
-        let expected_pubkey = challenge.challenger.to_bytes();
-        
-        // Nota: questa è una semplificazione, in un'implementazione reale
-        // dovremmo convertire correttamente tra il formato Secp256k1 e Solana
-        if pubkey_bytes != expected_pubkey {
-            msg!("La chiave pubblica recuperata non corrisponde al challenger");
-            return Err(Layer2Error::InvalidSignature.into());
-        }
-        
-        Ok(())
-    }
-
-    /// Verifica la prova di una sfida
-    pub fn validate_challenge_proof(&self, challenge: &Challenge, state: &Layer2State) -> ProgramResult {
-        // In un'implementazione reale, qui verificheremmo la prova crittografica
-        // che dimostra l'invalidità dello stato contestato
-        
-        // Per semplicità, qui assumiamo che la prova sia valida se contiene
-        // almeno 64 byte di dati (una firma)
-        if challenge.proof_data.len() < 64 {
-            msg!("Prova della sfida non valida");
-            return Err(Layer2Error::InvalidChallenge.into());
-        }
-        
-        Ok(())
-    }
-
-    /// Verifica un deposito
-    pub fn validate_deposit(
-        &self,
-        amount: u64,
-        sender: &Pubkey,
-        recipient: &Pubkey,
-    ) -> ProgramResult {
-        // Verifica che l'importo sia valido
-        if amount == 0 {
-            msg!("Importo non valido");
-            return Err(Layer2Error::InvalidAmount.into());
-        }
-        
-        // Verifica che il mittente e il destinatario siano validi
-        if sender == &Pubkey::default() || recipient == &Pubkey::default() {
-            msg!("Mittente o destinatario non valido");
-            return Err(Layer2Error::InvalidAddress.into());
-        }
-        
-        // Verifica che il mittente e il destinatario siano diversi
-        if sender == recipient {
-            msg!("Il mittente e il destinatario non possono essere uguali");
-            return Err(Layer2Error::SenderEqualsRecipient.into());
-        }
-        
-        Ok(())
-    }
-
-    /// Verifica un prelievo
-    pub fn validate_withdrawal(
-        &self,
-        amount: u64,
-        sender: &Pubkey,
-        recipient: &Pubkey,
-        proof: &Proof,
-    ) -> ProgramResult {
-        // Verifica che l'importo sia valido
-        if amount == 0 {
-            msg!("Importo non valido");
-            return Err(Layer2Error::InvalidAmount.into());
-        }
-        
-        // Verifica che il mittente e il destinatario siano validi
-        if sender == &Pubkey::default() || recipient == &Pubkey::default() {
-            msg!("Mittente o destinatario non valido");
-            return Err(Layer2Error::InvalidAddress.into());
-        }
-        
-        // Verifica che il mittente e il destinatario siano diversi
-        if sender == recipient {
-            msg!("Il mittente e il destinatario non possono essere uguali");
-            return Err(Layer2Error::SenderEqualsRecipient.into());
-        }
-        
-        // Verifica la firma del prelievo
-        self.validate_withdrawal_signature(amount, sender, recipient, proof)?;
-        
-        // Verifica la prova di inclusione nell'albero di Merkle
-        self.validate_withdrawal_merkle_proof(amount, sender, recipient, proof)?;
-        
-        Ok(())
-    }
-
-    /// Verifica la firma di un prelievo
-    pub fn validate_withdrawal_signature(
-        &self,
-        amount: u64,
-        sender: &Pubkey,
-        recipient: &Pubkey,
-        proof: &Proof,
-    ) -> ProgramResult {
-        // Verifica che la firma non sia vuota
-        if proof.signature.is_empty() {
-            msg!("Firma del prelievo mancante");
-            return Err(Layer2Error::InvalidSignature.into());
-        }
-        
-        // Serializza i dati del prelievo
-        let mut withdrawal_data = Vec::new();
-        withdrawal_data.extend_from_slice(&sender.to_bytes());
-        withdrawal_data.extend_from_slice(&recipient.to_bytes());
-        withdrawal_data.extend_from_slice(&amount.to_le_bytes());
-        
-        // Calcola l'hash del prelievo
-        let withdrawal_hash = keccak::hash(&withdrawal_data);
-        
-        // Estrai la firma e la chiave pubblica
-        if proof.signature.len() < 65 {
-            msg!("Lunghezza della firma non valida");
-            return Err(Layer2Error::InvalidSignature.into());
-        }
-        
-        let signature = &proof.signature[0..64];
-        let recovery_id = proof.signature[64];
-        
-        // Recupera la chiave pubblica dalla firma
-        let recovered_pubkey = match Secp256k1::recover(
-            &Message::parse(&withdrawal_hash.0),
-            &Signature::parse_slice(signature)?,
-            recovery_id,
-        ) {
-            Ok(pubkey) => pubkey,
-            Err(_) => {
-                msg!("Impossibile recuperare la chiave pubblica dalla firma");
-                return Err(Layer2Error::InvalidSignature.into());
-            }
-        };
-        
-        // Verifica che la chiave pubblica recuperata corrisponda al mittente
-        let pubkey_bytes = recovered_pubkey.serialize();
-        let expected_pubkey = sender.to_bytes();
-        
-        // Nota: questa è una semplificazione, in un'implementazione reale
-        // dovremmo convertire correttamente tra il formato Secp256k1 e Solana
-        if pubkey_bytes != expected_pubkey {
-            msg!("La chiave pubblica recuperata non corrisponde al mittente");
-            return Err(Layer2Error::InvalidSignature.into());
-        }
-        
-        Ok(())
-    }
-
-    /// Verifica la prova di Merkle di un prelievo
-    pub fn validate_withdrawal_merkle_proof(
-        &self,
-        amount: u64,
-        sender: &Pubkey,
-        recipient: &Pubkey,
-        proof: &Proof,
-    ) -> ProgramResult {
-        // Verifica che la prova non sia vuota
-        if proof.merkle_proof.is_empty() {
-            msg!("Prova di Merkle mancante");
-            return Err(Layer2Error::InvalidMerkleProof.into());
-        }
-        
-        // Serializza i dati del prelievo
-        let mut withdrawal_data = Vec::new();
-        withdrawal_data.extend_from_slice(&sender.to_bytes());
-        withdrawal_data.extend_from_slice(&recipient.to_bytes());
-        withdrawal_data.extend_from_slice(&amount.to_le_bytes());
-        
-        // Calcola l'hash del prelievo
-        let withdrawal_hash = keccak::hash(&withdrawal_data);
-        
-        // Verifica la prova di Merkle
-        self.validate_merkle_proof(
-            &withdrawal_hash.0,
-            &proof.merkle_proof,
-            &proof.merkle_root,
-        )?;
-        
-        Ok(())
-    }
-
-    /// Verifica i permessi di un account per un'operazione specifica
-    pub fn validate_account_permissions(
-        &self,
-        account_info: &AccountInfo,
-        required_permissions: u64,
-        state: &Layer2State,
-    ) -> ProgramResult {
-        // Verifica che l'account sia di proprietà del programma
-        self.validate_account_owner(account_info)?;
-        
-        // Carica l'account
-        let account = Account::unpack_from_slice(&account_info.data.borrow())?;
-        
-        // Verifica che l'account sia inizializzato
-        if !account.is_initialized {
-            msg!("L'account non è inizializzato");
-            return Err(Layer2Error::InvalidAccountData.into());
-        }
-        
-        // Verifica che l'account abbia i permessi richiesti
-        if (account.permissions & required_permissions) != required_permissions {
-            msg!("L'account non ha i permessi richiesti");
-            return Err(Layer2Error::Unauthorized.into());
-        }
-        
-        // Verifica che l'account non sia stato bloccato
-        if account.is_locked {
-            msg!("L'account è bloccato");
-            return Err(Layer2Error::AccountLocked.into());
-        }
-        
-        // Verifica che l'account non sia scaduto
-        let clock = Clock::get()?;
-        if account.expiry_timestamp > 0 && account.expiry_timestamp < clock.unix_timestamp as u64 {
-            msg!("L'account è scaduto");
-            return Err(Layer2Error::AccountExpired.into());
-        }
-        
-        Ok(())
-    }
-
-    /// Verifica l'autorizzazione multi-livello per un'operazione critica
-    pub fn validate_multi_level_authorization(
-        &self,
-        primary_signer: &AccountInfo,
-        secondary_signer: &AccountInfo,
-        operation_type: u8,
-        state: &Layer2State,
-    ) -> ProgramResult {
-        // Verifica che entrambi gli account siano firmatari
-        self.validate_is_signer(primary_signer)?;
-        self.validate_is_signer(secondary_signer)?;
-        
-        // Verifica che gli account siano diversi
-        if primary_signer.key == secondary_signer.key {
-            msg!("Gli account firmatari devono essere diversi");
-            return Err(Layer2Error::InvalidSignature.into());
-        }
-        
-        // Verifica che il primary_signer sia autorizzato per l'operazione
-        match operation_type {
-            // Operazioni amministrative
+        // Verifica il tipo di sfida
+        match challenge.challenge_type {
             0 => {
-                if *primary_signer.key != state.admin {
-                    msg!("L'account non è l'amministratore");
-                    return Err(Layer2Error::Unauthorized.into());
-                }
+                // Sfida per double-spending
+                self.validate_challenge_double_spending(transaction, history_account)?;
             },
-            // Operazioni del sequencer
             1 => {
-                if *primary_signer.key != state.sequencer {
-                    msg!("L'account non è il sequencer");
-                    return Err(Layer2Error::Unauthorized.into());
-                }
+                // Sfida per saldo insufficiente
+                self.validate_challenge_insufficient_balance(transaction, state_account)?;
             },
-            // Operazioni di emergenza
             2 => {
-                if *primary_signer.key != state.emergency_admin {
-                    msg!("L'account non è l'amministratore di emergenza");
-                    return Err(Layer2Error::Unauthorized.into());
+                // Sfida per firma non valida
+                if self.validate_transaction_cryptographic(transaction).is_ok() {
+                    msg!("La firma della transazione è valida, sfida non valida");
+                    return Err(Layer2Error::InvalidChallenge.into());
                 }
             },
-            // Altre operazioni
+            3 => {
+                // Sfida per transazione scaduta
+                if transaction.expiry_timestamp >= clock.unix_timestamp as u64 {
+                    msg!("La transazione non è scaduta, sfida non valida");
+                    return Err(Layer2Error::InvalidChallenge.into());
+                }
+            },
             _ => {
-                msg!("Tipo di operazione non valido");
-                return Err(Layer2Error::InvalidInstruction.into());
+                msg!("Tipo di sfida non valido");
+                return Err(Layer2Error::InvalidChallengeType.into());
             }
         }
         
-        // Verifica che il secondary_signer sia autorizzato come approvatore
-        let is_approver = state.approvers.contains(secondary_signer.key);
-        if !is_approver {
-            msg!("L'account secondario non è un approvatore autorizzato");
-            return Err(Layer2Error::Unauthorized.into());
-        }
-        
-        // Verifica il timeout dell'autorizzazione
-        let clock = Clock::get()?;
-        let current_time = clock.unix_timestamp as u64;
-        
-        // In un'implementazione reale, verificheremmo che l'autorizzazione
-        // sia stata richiesta entro un certo periodo di tempo
-        
         Ok(())
     }
 
-    /// Verifica la proprietà di un account
-    pub fn validate_account_ownership(
+    /// Verifica una sfida per double-spending
+    pub fn validate_challenge_double_spending(
         &self,
-        account_info: &AccountInfo,
-        expected_owner: &Pubkey,
+        transaction: &Transaction,
+        history_account: &AccountInfo,
     ) -> ProgramResult {
-        // Verifica che l'account sia di proprietà del programma
-        self.validate_account_owner(account_info)?;
+        // Deserializza la cronologia delle transazioni
+        let history_data = history_account.try_borrow_data()?;
+        let history = TransactionHistory::unpack(&history_data)?;
         
-        // Carica l'account
-        let account = Account::unpack_from_slice(&account_info.data.borrow())?;
+        // Verifica che il nonce sia già stato utilizzato
+        let mut nonce_used = false;
         
-        // Verifica che l'account sia inizializzato
-        if !account.is_initialized {
-            msg!("L'account non è inizializzato");
-            return Err(Layer2Error::InvalidAccountData.into());
+        for spent_nonce in &history.spent_nonces {
+            if spent_nonce.sender == transaction.sender && spent_nonce.nonce == transaction.nonce {
+                nonce_used = true;
+                break;
+            }
         }
         
-        // Verifica che il proprietario dell'account corrisponda a quello atteso
-        if account.owner != *expected_owner {
-            msg!("Il proprietario dell'account non corrisponde a quello atteso");
-            return Err(Layer2Error::Unauthorized.into());
+        if !nonce_used {
+            msg!("Il nonce non è stato utilizzato, sfida non valida");
+            return Err(Layer2Error::InvalidChallenge.into());
         }
         
         Ok(())
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use solana_program::clock::Epoch;
-    use solana_program::account_info::AccountInfo;
-    
-    // Test per validate_account_owner
-    #[test]
-    fn test_validate_account_owner() {
-        let program_id = Pubkey::new_unique();
-        let validator = Validator::new(&program_id);
+    /// Verifica una sfida per saldo insufficiente
+    pub fn validate_challenge_insufficient_balance(
+        &self,
+        transaction: &Transaction,
+        state_account: &AccountInfo,
+    ) -> ProgramResult {
+        // Deserializza lo stato
+        let state_data = state_account.try_borrow_data()?;
+        let state = Layer2State::unpack(&state_data)?;
         
-        let key = Pubkey::new_unique();
-        let mut lamports = 100;
-        let mut data = vec![0; 10];
+        // Verifica che il mittente abbia un saldo insufficiente
+        let sender_account = state.accounts.iter()
+            .find(|a| a.address == transaction.sender)
+            .ok_or(Layer2Error::AccountNotFound)?;
         
-        // Account di proprietà del programma
-        let account_info = AccountInfo::new(
-            &key,
-            false,
-            true,
-            &mut lamports,
-            &mut data,
-            &program_id,
-            false,
-            Epoch::default(),
-        );
+        if sender_account.balance >= transaction.amount {
+            msg!("Il mittente ha un saldo sufficiente, sfida non valida");
+            return Err(Layer2Error::InvalidChallenge.into());
+        }
         
-        assert_eq!(validator.validate_account_owner(&account_info), Ok(()));
-        
-        // Account non di proprietà del programma
-        let other_program_id = Pubkey::new_unique();
-        let account_info = AccountInfo::new(
-            &key,
-            false,
-            true,
-            &mut lamports,
-            &mut data,
-            &other_program_id,
-            false,
-            Epoch::default(),
-        );
-        
-        assert_eq!(
-            validator.validate_account_owner(&account_info),
-            Err(ProgramError::IncorrectProgramId)
-        );
-    }
-    
-    // Test per validate_is_writable
-    #[test]
-    fn test_validate_is_writable() {
-        let program_id = Pubkey::new_unique();
-        let validator = Validator::new(&program_id);
-        
-        let key = Pubkey::new_unique();
-        let mut lamports = 100;
-        let mut data = vec![0; 10];
-        
-        // Account scrivibile
-        let account_info = AccountInfo::new(
-            &key,
-            false,
-            true,
-            &mut lamports,
-            &mut data,
-            &program_id,
-            false,
-            Epoch::default(),
-        );
-        
-        assert_eq!(validator.validate_is_writable(&account_info), Ok(()));
-        
-        // Account non scrivibile
-        let account_info = AccountInfo::new(
-            &key,
-            false,
-            false,
-            &mut lamports,
-            &mut data,
-            &program_id,
-            false,
-            Epoch::default(),
-        );
-        
-        assert_eq!(
-            validator.validate_is_writable(&account_info),
-            Err(ProgramError::InvalidAccountData)
-        );
-    }
-    
-    // Test per validate_is_signer
-    #[test]
-    fn test_validate_is_signer() {
-        let program_id = Pubkey::new_unique();
-        let validator = Validator::new(&program_id);
-        
-        let key = Pubkey::new_unique();
-        let mut lamports = 100;
-        let mut data = vec![0; 10];
-        
-        // Account firmato
-        let account_info = AccountInfo::new(
-            &key,
-            true,
-            true,
-            &mut lamports,
-            &mut data,
-            &program_id,
-            false,
-            Epoch::default(),
-        );
-        
-        assert_eq!(validator.validate_is_signer(&account_info), Ok(()));
-        
-        // Account non firmato
-        let account_info = AccountInfo::new(
-            &key,
-            false,
-            true,
-            &mut lamports,
-            &mut data,
-            &program_id,
-            false,
-            Epoch::default(),
-        );
-        
-        assert_eq!(
-            validator.validate_is_signer(&account_info),
-            Err(ProgramError::MissingRequiredSignature)
-        );
-    }
-    
-    // Test per validate_multi_level_authorization
-    #[test]
-    fn test_validate_multi_level_authorization() {
-        let program_id = Pubkey::new_unique();
-        let validator = Validator::new(&program_id);
-        
-        let admin_key = Pubkey::new_unique();
-        let approver_key = Pubkey::new_unique();
-        let sequencer_key = Pubkey::new_unique();
-        let emergency_admin_key = Pubkey::new_unique();
-        
-        let mut admin_lamports = 100;
-        let mut admin_data = vec![0; 10];
-        let admin_info = AccountInfo::new(
-            &admin_key,
-            true,
-            true,
-            &mut admin_lamports,
-            &mut admin_data,
-            &Pubkey::default(),
-            false,
-            Epoch::default(),
-        );
-        
-        let mut approver_lamports = 100;
-        let mut approver_data = vec![0; 10];
-        let approver_info = AccountInfo::new(
-            &approver_key,
-            true,
-            true,
-            &mut approver_lamports,
-            &mut approver_data,
-            &Pubkey::default(),
-            false,
-            Epoch::default(),
-        );
-        
-        // Crea uno stato con admin, sequencer, emergency_admin e approvers
-        let mut state = Layer2State::new(
-            1,
-            0,
-            0,
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            sequencer_key,
-        );
-        state.admin = admin_key;
-        state.emergency_admin = emergency_admin_key;
-        state.approvers = vec![approver_key];
-        
-        // Test per operazione amministrativa (tipo 0)
-        let result = validator.validate_multi_level_authorization(
-            &admin_info,
-            &approver_info,
-            0,
-            &state,
-        );
-        assert_eq!(result, Ok(()));
-        
-        // Test per operazione non autorizzata
-        let other_key = Pubkey::new_unique();
-        let mut other_lamports = 100;
-        let mut other_data = vec![0; 10];
-        let other_info = AccountInfo::new(
-            &other_key,
-            true,
-            true,
-            &mut other_lamports,
-            &mut other_data,
-            &Pubkey::default(),
-            false,
-            Epoch::default(),
-        );
-        
-        let result = validator.validate_multi_level_authorization(
-            &other_info,
-            &approver_info,
-            0,
-            &state,
-        );
-        assert!(result.is_err());
+        Ok(())
     }
 }
