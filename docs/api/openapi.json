@@ -1,0 +1,1024 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "LAYER-2 API",
+    "description": "API for the LAYER-2 system on Solana, including distributed sequencer and secrets management",
+    "version": "1.0.0",
+    "contact": {
+      "name": "LAYER-2 Team",
+      "email": "support@layer2.solana.com",
+      "url": "https://layer2.solana.com"
+    },
+    "license": {
+      "name": "MIT",
+      "url": "https://opensource.org/licenses/MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://api.layer2.solana.com/v1",
+      "description": "Production server"
+    },
+    {
+      "url": "https://staging-api.layer2.solana.com/v1",
+      "description": "Staging server"
+    },
+    {
+      "url": "http://localhost:3000/v1",
+      "description": "Local development server"
+    }
+  ],
+  "tags": [
+    {
+      "name": "sequencer",
+      "description": "Operations related to the sequencer"
+    },
+    {
+      "name": "distributed",
+      "description": "Operations related to the distributed system"
+    },
+    {
+      "name": "secrets",
+      "description": "Operations related to secrets management"
+    },
+    {
+      "name": "transactions",
+      "description": "Operations related to transactions"
+    },
+    {
+      "name": "status",
+      "description": "Operations related to system status"
+    }
+  ],
+  "paths": {
+    "/sequencer/status": {
+      "get": {
+        "tags": ["sequencer", "status"],
+        "summary": "Get sequencer status",
+        "description": "Returns detailed information about the current state of the sequencer",
+        "operationId": "getSequencerStatus",
+        "responses": {
+          "200": {
+            "description": "Sequencer status retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SequencerStatus"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sequencer/transactions": {
+      "post": {
+        "tags": ["sequencer", "transactions"],
+        "summary": "Submit a transaction to the sequencer",
+        "description": "Submits a transaction to the sequencer for processing",
+        "operationId": "submitTransaction",
+        "requestBody": {
+          "description": "Transaction to submit",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Transaction"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Transaction accepted for processing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "get": {
+        "tags": ["sequencer", "transactions"],
+        "summary": "Get transactions processed by the sequencer",
+        "description": "Returns a list of transactions processed by the sequencer",
+        "operationId": "getTransactions",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of transactions to return",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 10
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Number of transactions to skip",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Filter by transaction status",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["pending", "processing", "completed", "failed"],
+              "default": "completed"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of transactions retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "transactions": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Transaction"
+                      }
+                    },
+                    "total": {
+                      "type": "integer",
+                      "format": "int32",
+                      "description": "Total number of transactions matching the filter criteria"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/sequencer/transactions/{transactionId}": {
+      "get": {
+        "tags": ["sequencer", "transactions"],
+        "summary": "Get a specific transaction",
+        "description": "Returns details of a specific transaction",
+        "operationId": "getTransaction",
+        "parameters": [
+          {
+            "name": "transactionId",
+            "in": "path",
+            "description": "ID of the transaction",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transaction retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Transaction"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Transaction not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/distributed/nodes": {
+      "get": {
+        "tags": ["distributed"],
+        "summary": "Get the list of nodes in the cluster",
+        "description": "Returns information about the nodes in the distributed cluster",
+        "operationId": "getNodes",
+        "responses": {
+          "200": {
+            "description": "List of nodes retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "nodes": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Node"
+                      }
+                    },
+                    "leader": {
+                      "type": "string",
+                      "description": "ID of the leader node"
+                    },
+                    "term": {
+                      "type": "integer",
+                      "format": "int32",
+                      "description": "Current term of the Raft consensus"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/distributed/nodes/{nodeId}": {
+      "get": {
+        "tags": ["distributed"],
+        "summary": "Get information about a specific node",
+        "description": "Returns detailed information about a specific node in the cluster",
+        "operationId": "getNode",
+        "parameters": [
+          {
+            "name": "nodeId",
+            "in": "path",
+            "description": "ID of the node",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Node information retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Node"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Node not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/distributed/sync": {
+      "post": {
+        "tags": ["distributed"],
+        "summary": "Start node synchronization",
+        "description": "Starts synchronization of a node with the current state of the cluster",
+        "operationId": "syncNode",
+        "requestBody": {
+          "description": "Information about the node to synchronize",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "nodeId": {
+                    "type": "string",
+                    "description": "ID of the node to synchronize"
+                  }
+                },
+                "required": ["nodeId"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Synchronization started successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "syncId": {
+                      "type": "string",
+                      "description": "ID of the synchronization"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["started", "in-progress", "completed", "failed"],
+                      "description": "Status of the synchronization"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/secrets": {
+      "get": {
+        "tags": ["secrets"],
+        "summary": "Get the list of available secrets",
+        "description": "Returns a list of available secrets (names only, not values)",
+        "operationId": "listSecrets",
+        "responses": {
+          "200": {
+            "description": "List of secrets retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "secrets": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": ["secrets"],
+        "summary": "Create a new secret",
+        "description": "Creates a new secret in the secrets manager",
+        "operationId": "createSecret",
+        "requestBody": {
+          "description": "Secret to create",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "Name of the secret"
+                  },
+                  "value": {
+                    "type": "string",
+                    "description": "Value of the secret"
+                  }
+                },
+                "required": ["name", "value"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Secret created successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "description": "Name of the secret"
+                    },
+                    "created": {
+                      "type": "boolean",
+                      "description": "Indicates whether the secret was created successfully"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/secrets/{name}": {
+      "delete": {
+        "tags": ["secrets"],
+        "summary": "Delete a secret",
+        "description": "Deletes a secret from the secrets manager",
+        "operationId": "deleteSecret",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Name of the secret",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Secret deleted successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "description": "Name of the secret"
+                    },
+                    "deleted": {
+                      "type": "boolean",
+                      "description": "Indicates whether the secret was deleted successfully"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Secret not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/secrets/{name}/rotate": {
+      "post": {
+        "tags": ["secrets"],
+        "summary": "Rotate a secret",
+        "description": "Rotates a secret in the secrets manager",
+        "operationId": "rotateSecret",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Name of the secret",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Secret rotated successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "description": "Name of the secret"
+                    },
+                    "rotated": {
+                      "type": "boolean",
+                      "description": "Indicates whether the secret was rotated successfully"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Secret not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/status": {
+      "get": {
+        "tags": ["status"],
+        "summary": "Get system status",
+        "description": "Returns information about the overall system status",
+        "operationId": "getSystemStatus",
+        "responses": {
+          "200": {
+            "description": "System status retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemStatus"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Transaction": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Unique ID of the transaction"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["deposit", "withdraw", "transfer"],
+            "description": "Type of transaction"
+          },
+          "amount": {
+            "type": "number",
+            "format": "double",
+            "description": "Amount of the transaction"
+          },
+          "account": {
+            "type": "string",
+            "description": "Account involved in the transaction"
+          },
+          "fromAccount": {
+            "type": "string",
+            "description": "Source account (for transfers)"
+          },
+          "toAccount": {
+            "type": "string",
+            "description": "Destination account (for transfers)"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "processing", "completed", "failed"],
+            "description": "Status of the transaction"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Date and time of the transaction"
+          },
+          "signature": {
+            "type": "string",
+            "description": "Signature of the transaction"
+          },
+          "error": {
+            "type": "string",
+            "description": "Error message (if the transaction failed)"
+          }
+        },
+        "required": ["id", "type", "amount", "status", "timestamp"]
+      },
+      "TransactionResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Unique ID of the transaction"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "processing", "completed", "failed"],
+            "description": "Status of the transaction"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Date and time of the response"
+          }
+        },
+        "required": ["id", "status", "timestamp"]
+      },
+      "SequencerStatus": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "ID of the sequencer"
+          },
+          "state": {
+            "type": "string",
+            "enum": ["running", "paused", "stopped", "error"],
+            "description": "State of the sequencer"
+          },
+          "uptime": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Uptime in seconds"
+          },
+          "transactionsProcessed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of transactions processed"
+          },
+          "transactionsPerSecond": {
+            "type": "number",
+            "format": "double",
+            "description": "Transactions processed per second"
+          },
+          "pendingTransactions": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of pending transactions"
+          },
+          "lastProcessedTimestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Date and time of the last processed transaction"
+          },
+          "isLeader": {
+            "type": "boolean",
+            "description": "Indicates whether this sequencer is the leader"
+          },
+          "version": {
+            "type": "string",
+            "description": "Version of the sequencer software"
+          }
+        },
+        "required": ["id", "state", "uptime", "transactionsProcessed", "isLeader"]
+      },
+      "Node": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Unique ID of the node"
+          },
+          "address": {
+            "type": "string",
+            "description": "Address of the node"
+          },
+          "state": {
+            "type": "string",
+            "enum": ["follower", "candidate", "leader"],
+            "description": "State of the node in the Raft consensus"
+          },
+          "term": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Current term of the node"
+          },
+          "lastHeartbeat": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Date and time of the last heartbeat received"
+          },
+          "uptime": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Uptime in seconds"
+          },
+          "version": {
+            "type": "string",
+            "description": "Version of the node software"
+          },
+          "metrics": {
+            "type": "object",
+            "properties": {
+              "cpuUsage": {
+                "type": "number",
+                "format": "double",
+                "description": "CPU usage in percentage"
+              },
+              "memoryUsage": {
+                "type": "number",
+                "format": "double",
+                "description": "Memory usage in percentage"
+              },
+              "diskUsage": {
+                "type": "number",
+                "format": "double",
+                "description": "Disk usage in percentage"
+              }
+            }
+          }
+        },
+        "required": ["id", "address", "state", "term"]
+      },
+      "SystemStatus": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["healthy", "degraded", "unhealthy"],
+            "description": "Overall status of the system"
+          },
+          "version": {
+            "type": "string",
+            "description": "Version of the software"
+          },
+          "uptime": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Uptime in seconds"
+          },
+          "nodesCount": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of nodes in the cluster"
+          },
+          "activeNodes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of active nodes"
+          },
+          "transactionsProcessed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total number of transactions processed"
+          },
+          "transactionsPerSecond": {
+            "type": "number",
+            "format": "double",
+            "description": "Transactions processed per second"
+          },
+          "lastUpdate": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Date and time of the last status update"
+          },
+          "components": {
+            "type": "object",
+            "properties": {
+              "sequencer": {
+                "type": "string",
+                "enum": ["healthy", "degraded", "unhealthy"],
+                "description": "Status of the sequencer"
+              },
+              "consensus": {
+                "type": "string",
+                "enum": ["healthy", "degraded", "unhealthy"],
+                "description": "Status of the consensus"
+              },
+              "stateReplication": {
+                "type": "string",
+                "enum": ["healthy", "degraded", "unhealthy"],
+                "description": "Status of the state replication"
+              },
+              "secretsManager": {
+                "type": "string",
+                "enum": ["healthy", "degraded", "unhealthy"],
+                "description": "Status of the secrets manager"
+              }
+            }
+          }
+        },
+        "required": ["status", "version", "uptime", "lastUpdate"]
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Error code"
+          },
+          "message": {
+            "type": "string",
+            "description": "Error message"
+          },
+          "details": {
+            "type": "string",
+            "description": "Additional details about the error"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Date and time of the error"
+          }
+        },
+        "required": ["code", "message", "timestamp"]
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    }
+  }
+}
