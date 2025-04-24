@@ -1,0 +1,18 @@
+{
+  "entryPoints": ["src/bridge.ts", "src/metrics.ts"],
+  "out": "docs/api",
+  "name": "Solana Layer 2 SDK",
+  "includeVersion": true,
+  "excludePrivate": true,
+  "excludeProtected": true,
+  "excludeExternals": true,
+  "readme": "docs/README.md",
+  "plugin": ["typedoc-plugin-markdown"],
+  "theme": "default",
+  "hideGenerator": true,
+  "categorizeByGroup": true,
+  "categoryOrder": ["Core", "Bridge", "NFT", "Transactions", "Metrics", "*"],
+  "navigationLinks": {
+    "GitHub": "https://github.com/buybotsolana/LAYER-2"
+  }
+}

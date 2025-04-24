@@ -1,0 +1,48 @@
+{
+  "name": "solana-layer2",
+  "version": "0.1.0",
+  "description": "Solana Layer 2 con compatibilità Ethereum",
+  "main": "index.js",
+  "scripts": {
+    "start:sequencer": "node offchain/sequencer.js",
+    "start:bridge": "node offchain/bridge.js",
+    "start:relayer": "node relayer/wormhole-relayer.js",
+    "build": "npm run build:sdk && npm run build:offchain",
+    "build:sdk": "cd sdk && npm run build",
+    "build:offchain": "echo \"Building offchain components...\" && mkdir -p dist && cp -r offchain/* dist/",
+    "test": "npm run test:sdk && npm run test:offchain",
+    "test:sdk": "cd sdk && npm run test",
+    "test:offchain": "jest --config jest.config.js",
+    "lint": "eslint . --ext .js,.ts",
+    "audit:fix": "npm audit fix --force",
+    "postinstall": "npm run install:all",
+    "install:all": "npm run install:offchain && npm run install:bridge && npm run install:relayer && npm run install:sdk && npm run install:evm",
+    "install:offchain": "cd offchain && npm install",
+    "install:bridge": "cd bridge && npm install",
+    "install:relayer": "cd relayer && npm install",
+    "install:sdk": "cd sdk && npm install",
+    "install:evm": "cd evm-compatibility && npm install"
+  },
+  "author": "Solana Layer 2 Team",
+  "license": "MIT",
+  "dependencies": {
+    "@solana/web3.js": "^1.73.3",
+    "merkletreejs": "^0.3.10",
+    "crypto-js": "^4.1.1",
+    "web3": "^1.9.0",
+    "dotenv": "^16.0.3",
+    "express": "^4.18.2",
+    "axios": "^1.3.4",
+    "bs58": "^5.0.0"
+  },
+  "devDependencies": {
+    "jest": "^29.5.0",
+    "eslint": "^8.36.0",
+    "typescript": "^4.9.5",
+    "@types/node": "^18.15.3"
+  },
+  "engines": {
+    "node": ">=16.0.0",
+    "npm": ">=8.0.0"
+  }
+}
