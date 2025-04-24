@@ -1,1907 +1,2120 @@
 /**
- * Implementazione ottimizzata del sistema di cache multi-livello per il Layer-2 su Solana
+ * Implementazione del Sistema di Cache Multi-livello per il Layer-2 su Solana
  * 
- * Questo modulo implementa un sistema di cache multi-livello avanzato con:
- * - Struttura a tre livelli (L1: memoria, L2: Redis, L3: distribuito)
- * - Prefetching predittivo basato su pattern di accesso
- * - Invalidazione selettiva basata su grafo di dipendenze
- * - Compressione adattiva dei dati
- * - Monitoraggio avanzato delle prestazioni
+ * Questo modulo implementa un sistema di cache multi-livello con supporto per
+ * prefetching predittivo, invalidazione selettiva e compressione adattiva.
  */
 
 const { EventEmitter } = require('events');
 const crypto = require('crypto');
-const { promisify } = require('util');
 const zlib = require('zlib');
-const { LRUCache } = require('lru-cache');
-const { WorkerPool } = require('./worker-pool');
+const { promisify } = require('util');
+const { performance } = require('perf_hooks');
+const { Worker } = require('worker_threads');
+const os = require('os');
 const path = require('path');
-const fs = require('fs').promises;
+const { v4: uuidv4 } = require('uuid');
+const { PerformanceMetrics } = require('./performance-metrics');
+const { WorkerPool } = require('./worker-pool');
 
-// Promisify delle funzioni di compressione
-const compressAsync = promisify(zlib.deflate);
-const decompressAsync = promisify(zlib.inflate);
+// Promisify zlib functions
+const gzipAsync = promisify(zlib.gzip);
+const gunzipAsync = promisify(zlib.gunzip);
+const deflateAsync = promisify(zlib.deflate);
+const inflateAsync = promisify(zlib.inflate);
 const brotliCompressAsync = promisify(zlib.brotliCompress);
 const brotliDecompressAsync = promisify(zlib.brotliDecompress);
 
 /**
+ * Classe CacheItem
+ * 
+ * Rappresenta un elemento nella cache
+ */
+class CacheItem {
+  /**
+   * Costruttore
+   * @param {string} key - Chiave dell'elemento
+   * @param {*} value - Valore dell'elemento
+   * @param {Object} options - Opzioni
+   */
+  constructor(key, value, options = {}) {
+    this.key = key;
+    this.value = value;
+    this.originalSize = this._calculateSize(value);
+    this.compressedSize = this.originalSize;
+    this.compressed = false;
+    this.compressedValue = null;
+    this.createdAt = Date.now();
+    this.lastAccessed = Date.now();
+    this.accessCount = 0;
+    this.ttl = options.ttl || 0; // 0 = nessun TTL
+    this.priority = options.priority || 0;
+    this.tags = options.tags || [];
+    this.metadata = options.metadata || {};
+    this.dependencies = options.dependencies || [];
+    this.dependents = new Set();
+  }
+
+  /**
+   * Calcola la dimensione di un valore
+   * @param {*} value - Valore
+   * @returns {number} - Dimensione in byte
+   * @private
+   */
+  _calculateSize(value) {
+    if (value === null || value === undefined) {
+      return 0;
+    }
+
+    if (Buffer.isBuffer(value)) {
+      return value.length;
+    }
+
+    if (typeof value === 'string') {
+      return Buffer.byteLength(value, 'utf8');
+    }
+
+    if (typeof value === 'number') {
+      return 8;
+    }
+
+    if (typeof value === 'boolean') {
+      return 1;
+    }
+
+    if (Array.isArray(value) || typeof value === 'object') {
+      try {
+        const json = JSON.stringify(value);
+        return Buffer.byteLength(json, 'utf8');
+      } catch (error) {
+        return 1024; // Valore di default per oggetti non serializzabili
+      }
+    }
+
+    return 1024; // Valore di default
+  }
+
+  /**
+   * Verifica se l'elemento è scaduto
+   * @returns {boolean} - True se l'elemento è scaduto
+   */
+  isExpired() {
+    if (this.ttl === 0) {
+      return false;
+    }
+
+    return Date.now() > this.createdAt + this.ttl;
+  }
+
+  /**
+   * Aggiorna il timestamp di ultimo accesso
+   */
+  updateAccessTime() {
+    this.lastAccessed = Date.now();
+    this.accessCount++;
+  }
+
+  /**
+   * Comprime il valore
+   * @param {string} algorithm - Algoritmo di compressione
+   * @returns {Promise<boolean>} - True se la compressione è riuscita
+   */
+  async compress(algorithm = 'gzip') {
+    // Se il valore è già compresso, non fare nulla
+    if (this.compressed) {
+      return true;
+    }
+
+    try {
+      // Converti il valore in Buffer se necessario
+      let valueBuffer;
+
+      if (Buffer.isBuffer(this.value)) {
+        valueBuffer = this.value;
+      } else if (typeof this.value === 'string') {
+        valueBuffer = Buffer.from(this.value, 'utf8');
+      } else {
+        valueBuffer = Buffer.from(JSON.stringify(this.value), 'utf8');
+      }
+
+      // Comprimi il valore
+      let compressedValue;
+
+      switch (algorithm) {
+        case 'gzip':
+          compressedValue = await gzipAsync(valueBuffer);
+          break;
+
+        case 'deflate':
+          compressedValue = await deflateAsync(valueBuffer);
+          break;
+
+        case 'brotli':
+          compressedValue = await brotliCompressAsync(valueBuffer);
+          break;
+
+        default:
+          throw new Error(`Algoritmo di compressione non supportato: ${algorithm}`);
+      }
+
+      // Verifica che la compressione sia efficace
+      if (compressedValue.length < valueBuffer.length) {
+        this.compressedValue = compressedValue;
+        this.compressedSize = compressedValue.length;
+        this.compressed = true;
+        this.compressionAlgorithm = algorithm;
+        return true;
+      }
+
+      return false;
+    } catch (error) {
+      console.error(`Errore durante la compressione del valore per la chiave ${this.key}:`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Decomprime il valore
+   * @returns {Promise<*>} - Valore decompresso
+   */
+  async decompress() {
+    // Se il valore non è compresso, restituisci il valore originale
+    if (!this.compressed || !this.compressedValue) {
+      return this.value;
+    }
+
+    try {
+      // Decomprime il valore
+      let decompressedValue;
+
+      switch (this.compressionAlgorithm) {
+        case 'gzip':
+          decompressedValue = await gunzipAsync(this.compressedValue);
+          break;
+
+        case 'deflate':
+          decompressedValue = await inflateAsync(this.compressedValue);
+          break;
+
+        case 'brotli':
+          decompressedValue = await brotliDecompressAsync(this.compressedValue);
+          break;
+
+        default:
+          throw new Error(`Algoritmo di compressione non supportato: ${this.compressionAlgorithm}`);
+      }
+
+      // Converti il valore decompresso nel formato originale
+      if (typeof this.value === 'string') {
+        return decompressedValue.toString('utf8');
+      } else if (typeof this.value === 'object' || Array.isArray(this.value)) {
+        return JSON.parse(decompressedValue.toString('utf8'));
+      }
+
+      return decompressedValue;
+    } catch (error) {
+      console.error(`Errore durante la decompressione del valore per la chiave ${this.key}:`, error);
+      return this.value;
+    }
+  }
+
+  /**
+   * Ottiene il valore dell'elemento
+   * @returns {Promise<*>} - Valore dell'elemento
+   */
+  async getValue() {
+    // Aggiorna il timestamp di ultimo accesso
+    this.updateAccessTime();
+
+    // Se il valore è compresso, decomprimilo
+    if (this.compressed) {
+      return this.decompress();
+    }
+
+    return this.value;
+  }
+
+  /**
+   * Aggiunge una dipendenza
+   * @param {string} key - Chiave della dipendenza
+   */
+  addDependency(key) {
+    if (!this.dependencies.includes(key)) {
+      this.dependencies.push(key);
+    }
+  }
+
+  /**
+   * Aggiunge un dipendente
+   * @param {string} key - Chiave del dipendente
+   */
+  addDependent(key) {
+    this.dependents.add(key);
+  }
+
+  /**
+   * Rimuove un dipendente
+   * @param {string} key - Chiave del dipendente
+   */
+  removeDependent(key) {
+    this.dependents.delete(key);
+  }
+
+  /**
+   * Ottiene i dipendenti
+   * @returns {Set<string>} - Dipendenti
+   */
+  getDependents() {
+    return this.dependents;
+  }
+
+  /**
+   * Ottiene le dipendenze
+   * @returns {Array<string>} - Dipendenze
+   */
+  getDependencies() {
+    return this.dependencies;
+  }
+
+  /**
+   * Ottiene la dimensione dell'elemento
+   * @returns {number} - Dimensione in byte
+   */
+  getSize() {
+    return this.compressed ? this.compressedSize : this.originalSize;
+  }
+
+  /**
+   * Ottiene il rapporto di compressione
+   * @returns {number} - Rapporto di compressione
+   */
+  getCompressionRatio() {
+    if (!this.compressed || this.originalSize === 0) {
+      return 1;
+    }
+
+    return this.compressedSize / this.originalSize;
+  }
+
+  /**
+   * Ottiene la frequenza di accesso
+   * @returns {number} - Frequenza di accesso
+   */
+  getAccessFrequency() {
+    const age = Math.max(1, Date.now() - this.createdAt);
+    return (this.accessCount * 1000) / age;
+  }
+
+  /**
+   * Ottiene il punteggio di priorità
+   * @returns {number} - Punteggio di priorità
+   */
+  getPriorityScore() {
+    const recency = Math.max(0, Date.now() - this.lastAccessed) / 1000;
+    const frequency = this.getAccessFrequency();
+    const size = this.getSize();
+
+    // Calcola il punteggio di priorità
+    // Più alto è il punteggio, più alta è la priorità di mantenere l'elemento in cache
+    return (frequency * this.priority) / (recency * Math.log(size + 1));
+  }
+}
+
+/**
+ * Classe CacheLevel
+ * 
+ * Rappresenta un livello nella cache multi-livello
+ */
+class CacheLevel extends EventEmitter {
+  /**
+   * Costruttore
+   * @param {string} name - Nome del livello
+   * @param {Object} options - Opzioni
+   */
+  constructor(name, options = {}) {
+    super();
+    
+    this.name = name;
+    this.options = {
+      capacity: options.capacity || 1024 * 1024 * 10, // 10 MB
+      ttl: options.ttl || 0, // 0 = nessun TTL
+      cleanupInterval: options.cleanupInterval || 60000, // 1 minuto
+      compressionThreshold: options.compressionThreshold || 1024, // 1 KB
+      compressionMinRatio: options.compressionMinRatio || 0.7, // 30% di riduzione
+      compressionAlgorithm: options.compressionAlgorithm || 'gzip',
+      enableCompression: options.enableCompression !== false,
+      ...options
+    };
+    
+    this.items = new Map();
+    this.size = 0;
+    this.hits = 0;
+    this.misses = 0;
+    this.evictions = 0;
+    this.cleanupTimer = null;
+    
+    // Avvia il timer di pulizia
+    this._startCleanupTimer();
+  }
+  
+  /**
+   * Avvia il timer di pulizia
+   * @private
+   */
+  _startCleanupTimer() {
+    if (this.options.cleanupInterval > 0) {
+      this.cleanupTimer = setInterval(() => {
+        this.cleanup().catch(error => {
+          console.error(`Errore durante la pulizia del livello ${this.name}:`, error);
+        });
+      }, this.options.cleanupInterval);
+      
+      // Evita che il timer impedisca al processo di terminare
+      this.cleanupTimer.unref();
+    }
+  }
+  
+  /**
+   * Imposta un elemento nella cache
+   * @param {string} key - Chiave dell'elemento
+   * @param {*} value - Valore dell'elemento
+   * @param {Object} options - Opzioni
+   * @returns {Promise<boolean>} - True se l'operazione è riuscita
+   */
+  async set(key, value, options = {}) {
+    // Verifica che la chiave sia una stringa
+    if (typeof key !== 'string') {
+      throw new Error('La chiave deve essere una stringa');
+    }
+    
+    // Verifica che il valore non sia undefined
+    if (value === undefined) {
+      throw new Error('Il valore non può essere undefined');
+    }
+    
+    // Opzioni di default
+    const itemOptions = {
+      ttl: options.ttl || this.options.ttl,
+      priority: options.priority || 1,
+      tags: options.tags || [],
+      metadata: options.metadata || {},
+      dependencies: options.dependencies || [],
+      ...options
+    };
+    
+    try {
+      // Crea l'elemento
+      const item = new CacheItem(key, value, itemOptions);
+      
+      // Verifica se l'elemento è troppo grande
+      if (item.originalSize > this.options.capacity) {
+        this.emit('error', {
+          level: this.name,
+          operation: 'set',
+          key,
+          error: new Error(`Elemento troppo grande: ${item.originalSize} byte`)
+        });
+        return false;
+      }
+      
+      // Comprimi l'elemento se necessario
+      if (this.options.enableCompression && 
+          item.originalSize >= this.options.compressionThreshold) {
+        await item.compress(this.options.compressionAlgorithm);
+      }
+      
+      // Verifica se è necessario fare spazio
+      const oldItem = this.items.get(key);
+      const oldSize = oldItem ? oldItem.getSize() : 0;
+      const newSize = item.getSize();
+      const sizeDiff = newSize - oldSize;
+      
+      if (sizeDiff > 0 && this.size + sizeDiff > this.options.capacity) {
+        // Fai spazio nella cache
+        await this._makeSpace(sizeDiff);
+      }
+      
+      // Aggiorna le dipendenze
+      if (oldItem) {
+        // Rimuovi il vecchio elemento dalle dipendenze
+        for (const depKey of oldItem.getDependencies()) {
+          const depItem = this.items.get(depKey);
+          if (depItem) {
+            depItem.removeDependent(key);
+          }
+        }
+      }
+      
+      // Aggiungi il nuovo elemento alle dipendenze
+      for (const depKey of item.getDependencies()) {
+        const depItem = this.items.get(depKey);
+        if (depItem) {
+          depItem.addDependent(key);
+        }
+      }
+      
+      // Aggiorna la dimensione della cache
+      this.size = this.size - oldSize + newSize;
+      
+      // Memorizza l'elemento
+      this.items.set(key, item);
+      
+      // Emetti evento
+      this.emit('set', {
+        level: this.name,
+        key,
+        size: newSize,
+        compressed: item.compressed,
+        compressionRatio: item.getCompressionRatio()
+      });
+      
+      return true;
+    } catch (error) {
+      console.error(`Errore durante l'impostazione dell'elemento per la chiave ${key}:`, error);
+      
+      // Emetti evento di errore
+      this.emit('error', {
+        level: this.name,
+        operation: 'set',
+        key,
+        error
+      });
+      
+      return false;
+    }
+  }
+  
+  /**
+   * Ottiene un elemento dalla cache
+   * @param {string} key - Chiave dell'elemento
+   * @returns {Promise<*>} - Valore dell'elemento o null se non trovato
+   */
+  async get(key) {
+    // Verifica che la chiave sia una stringa
+    if (typeof key !== 'string') {
+      throw new Error('La chiave deve essere una stringa');
+    }
+    
+    try {
+      // Verifica se l'elemento esiste
+      if (!this.items.has(key)) {
+        this.misses++;
+        
+        // Emetti evento
+        this.emit('miss', {
+          level: this.name,
+          key
+        });
+        
+        return null;
+      }
+      
+      // Ottieni l'elemento
+      const item = this.items.get(key);
+      
+      // Verifica se l'elemento è scaduto
+      if (item.isExpired()) {
+        // Rimuovi l'elemento
+        this.delete(key);
+        
+        this.misses++;
+        
+        // Emetti evento
+        this.emit('miss', {
+          level: this.name,
+          key,
+          reason: 'expired'
+        });
+        
+        return null;
+      }
+      
+      // Ottieni il valore
+      const value = await item.getValue();
+      
+      this.hits++;
+      
+      // Emetti evento
+      this.emit('hit', {
+        level: this.name,
+        key,
+        accessCount: item.accessCount,
+        lastAccessed: item.lastAccessed
+      });
+      
+      return value;
+    } catch (error) {
+      console.error(`Errore durante l'ottenimento dell'elemento per la chiave ${key}:`, error);
+      
+      // Emetti evento di errore
+      this.emit('error', {
+        level: this.name,
+        operation: 'get',
+        key,
+        error
+      });
+      
+      return null;
+    }
+  }
+  
+  /**
+   * Verifica se un elemento esiste nella cache
+   * @param {string} key - Chiave dell'elemento
+   * @returns {boolean} - True se l'elemento esiste
+   */
+  has(key) {
+    // Verifica che la chiave sia una stringa
+    if (typeof key !== 'string') {
+      throw new Error('La chiave deve essere una stringa');
+    }
+    
+    // Verifica se l'elemento esiste
+    if (!this.items.has(key)) {
+      return false;
+    }
+    
+    // Ottieni l'elemento
+    const item = this.items.get(key);
+    
+    // Verifica se l'elemento è scaduto
+    if (item.isExpired()) {
+      // Rimuovi l'elemento
+      this.delete(key);
+      return false;
+    }
+    
+    return true;
+  }
+  
+  /**
+   * Elimina un elemento dalla cache
+   * @param {string} key - Chiave dell'elemento
+   * @returns {boolean} - True se l'elemento è stato eliminato
+   */
+  delete(key) {
+    // Verifica che la chiave sia una stringa
+    if (typeof key !== 'string') {
+      throw new Error('La chiave deve essere una stringa');
+    }
+    
+    try {
+      // Verifica se l'elemento esiste
+      if (!this.items.has(key)) {
+        return false;
+      }
+      
+      // Ottieni l'elemento
+      const item = this.items.get(key);
+      
+      // Aggiorna la dimensione della cache
+      this.size -= item.getSize();
+      
+      // Rimuovi l'elemento dalle dipendenze
+      for (const depKey of item.getDependencies()) {
+        const depItem = this.items.get(depKey);
+        if (depItem) {
+          depItem.removeDependent(key);
+        }
+      }
+      
+      // Rimuovi l'elemento
+      this.items.delete(key);
+      
+      // Emetti evento
+      this.emit('delete', {
+        level: this.name,
+        key
+      });
+      
+      return true;
+    } catch (error) {
+      console.error(`Errore durante l'eliminazione dell'elemento per la chiave ${key}:`, error);
+      
+      // Emetti evento di errore
+      this.emit('error', {
+        level: this.name,
+        operation: 'delete',
+        key,
+        error
+      });
+      
+      return false;
+    }
+  }
+  
+  /**
+   * Elimina tutti gli elementi dalla cache
+   * @returns {boolean} - True se l'operazione è riuscita
+   */
+  clear() {
+    try {
+      // Rimuovi tutti gli elementi
+      this.items.clear();
+      
+      // Resetta la dimensione
+      this.size = 0;
+      
+      // Emetti evento
+      this.emit('clear', {
+        level: this.name
+      });
+      
+      return true;
+    } catch (error) {
+      console.error(`Errore durante la pulizia del livello ${this.name}:`, error);
+      
+      // Emetti evento di errore
+      this.emit('error', {
+        level: this.name,
+        operation: 'clear',
+        error
+      });
+      
+      return false;
+    }
+  }
+  
+  /**
+   * Invalida gli elementi con un tag specifico
+   * @param {string} tag - Tag
+   * @returns {number} - Numero di elementi invalidati
+   */
+  invalidateByTag(tag) {
+    try {
+      let count = 0;
+      
+      // Trova gli elementi con il tag
+      for (const [key, item] of this.items.entries()) {
+        if (item.tags.includes(tag)) {
+          // Rimuovi l'elemento
+          this.delete(key);
+          count++;
+        }
+      }
+      
+      // Emetti evento
+      if (count > 0) {
+        this.emit('invalidate', {
+          level: this.name,
+          tag,
+          count
+        });
+      }
+      
+      return count;
+    } catch (error) {
+      console.error(`Errore durante l'invalidazione degli elementi con il tag ${tag}:`, error);
+      
+      // Emetti evento di errore
+      this.emit('error', {
+        level: this.name,
+        operation: 'invalidateByTag',
+        tag,
+        error
+      });
+      
+      return 0;
+    }
+  }
+  
+  /**
+   * Invalida gli elementi con un pattern di chiave
+   * @param {string|RegExp} pattern - Pattern
+   * @returns {number} - Numero di elementi invalidati
+   */
+  invalidateByPattern(pattern) {
+    try {
+      let count = 0;
+      const regex = pattern instanceof RegExp ? pattern : new RegExp(pattern);
+      
+      // Trova gli elementi con la chiave che corrisponde al pattern
+      for (const key of this.items.keys()) {
+        if (regex.test(key)) {
+          // Rimuovi l'elemento
+          this.delete(key);
+          count++;
+        }
+      }
+      
+      // Emetti evento
+      if (count > 0) {
+        this.emit('invalidate', {
+          level: this.name,
+          pattern: pattern.toString(),
+          count
+        });
+      }
+      
+      return count;
+    } catch (error) {
+      console.error(`Errore durante l'invalidazione degli elementi con il pattern ${pattern}:`, error);
+      
+      // Emetti evento di errore
+      this.emit('error', {
+        level: this.name,
+        operation: 'invalidateByPattern',
+        pattern: pattern.toString(),
+        error
+      });
+      
+      return 0;
+    }
+  }
+  
+  /**
+   * Invalida gli elementi dipendenti da una chiave
+   * @param {string} key - Chiave
+   * @param {boolean} recursive - Invalida ricorsivamente
+   * @returns {number} - Numero di elementi invalidati
+   */
+  invalidateDependents(key, recursive = true) {
+    try {
+      // Verifica che la chiave sia una stringa
+      if (typeof key !== 'string') {
+        throw new Error('La chiave deve essere una stringa');
+      }
+      
+      // Verifica se l'elemento esiste
+      if (!this.items.has(key)) {
+        return 0;
+      }
+      
+      // Ottieni l'elemento
+      const item = this.items.get(key);
+      
+      // Ottieni i dipendenti
+      const dependents = [...item.getDependents()];
+      let count = 0;
+      
+      // Invalida i dipendenti
+      for (const depKey of dependents) {
+        // Rimuovi l'elemento
+        this.delete(depKey);
+        count++;
+        
+        // Invalida ricorsivamente
+        if (recursive) {
+          count += this.invalidateDependents(depKey, true);
+        }
+      }
+      
+      // Emetti evento
+      if (count > 0) {
+        this.emit('invalidate', {
+          level: this.name,
+          key,
+          dependents: count
+        });
+      }
+      
+      return count;
+    } catch (error) {
+      console.error(`Errore durante l'invalidazione dei dipendenti della chiave ${key}:`, error);
+      
+      // Emetti evento di errore
+      this.emit('error', {
+        level: this.name,
+        operation: 'invalidateDependents',
+        key,
+        error
+      });
+      
+      return 0;
+    }
+  }
+  
+  /**
+   * Esegue la pulizia della cache
+   * @returns {Promise<number>} - Numero di elementi rimossi
+   */
+  async cleanup() {
+    try {
+      let count = 0;
+      
+      // Rimuovi gli elementi scaduti
+      for (const [key, item] of this.items.entries()) {
+        if (item.isExpired()) {
+          // Rimuovi l'elemento
+          this.delete(key);
+          count++;
+        }
+      }
+      
+      // Emetti evento
+      if (count > 0) {
+        this.emit('cleanup', {
+          level: this.name,
+          count
+        });
+      }
+      
+      return count;
+    } catch (error) {
+      console.error(`Errore durante la pulizia del livello ${this.name}:`, error);
+      
+      // Emetti evento di errore
+      this.emit('error', {
+        level: this.name,
+        operation: 'cleanup',
+        error
+      });
+      
+      return 0;
+    }
+  }
+  
+  /**
+   * Fa spazio nella cache
+   * @param {number} requiredSpace - Spazio richiesto
+   * @returns {Promise<number>} - Spazio liberato
+   * @private
+   */
+  async _makeSpace(requiredSpace) {
+    // Verifica se è necessario fare spazio
+    if (requiredSpace <= 0 || this.size + requiredSpace <= this.options.capacity) {
+      return 0;
+    }
+    
+    try {
+      let freedSpace = 0;
+      
+      // Calcola lo spazio da liberare
+      const targetSpace = Math.max(requiredSpace, this.options.capacity * 0.1);
+      
+      // Ordina gli elementi per punteggio di priorità
+      const items = [...this.items.entries()]
+        .map(([key, item]) => ({ key, item, score: item.getPriorityScore() }))
+        .sort((a, b) => a.score - b.score);
+      
+      // Rimuovi gli elementi fino a liberare abbastanza spazio
+      for (const { key, item } of items) {
+        // Verifica se è stato liberato abbastanza spazio
+        if (freedSpace >= targetSpace) {
+          break;
+        }
+        
+        // Rimuovi l'elemento
+        this.delete(key);
+        
+        // Aggiorna lo spazio liberato
+        freedSpace += item.getSize();
+        
+        // Incrementa il contatore di evizioni
+        this.evictions++;
+      }
+      
+      // Emetti evento
+      if (freedSpace > 0) {
+        this.emit('eviction', {
+          level: this.name,
+          freedSpace,
+          evictions: this.evictions
+        });
+      }
+      
+      return freedSpace;
+    } catch (error) {
+      console.error(`Errore durante la liberazione di spazio nel livello ${this.name}:`, error);
+      
+      // Emetti evento di errore
+      this.emit('error', {
+        level: this.name,
+        operation: 'makeSpace',
+        error
+      });
+      
+      return 0;
+    }
+  }
+  
+  /**
+   * Ottiene le statistiche del livello
+   * @returns {Object} - Statistiche
+   */
+  getStats() {
+    return {
+      name: this.name,
+      size: this.size,
+      capacity: this.options.capacity,
+      usage: this.size / this.options.capacity,
+      items: this.items.size,
+      hits: this.hits,
+      misses: this.misses,
+      hitRatio: this.hits / (this.hits + this.misses || 1),
+      evictions: this.evictions
+    };
+  }
+  
+  /**
+   * Chiude il livello
+   */
+  close() {
+    // Ferma il timer di pulizia
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
+    
+    // Rimuovi tutti gli elementi
+    this.clear();
+    
+    // Rimuovi tutti i listener
+    this.removeAllListeners();
+  }
+}
+
+/**
+ * Classe PrefetchManager
+ * 
+ * Gestisce il prefetching predittivo
+ */
+class PrefetchManager extends EventEmitter {
+  /**
+   * Costruttore
+   * @param {MultiLevelCache} cache - Cache multi-livello
+   * @param {Object} options - Opzioni
+   */
+  constructor(cache, options = {}) {
+    super();
+    
+    this.cache = cache;
+    this.options = {
+      enabled: options.enabled !== false,
+      maxConcurrent: options.maxConcurrent || 5,
+      minConfidence: options.minConfidence || 0.5,
+      maxPrefetchSize: options.maxPrefetchSize || 1024 * 1024, // 1 MB
+      cooldown: options.cooldown || 1000, // 1 secondo
+      enableLearning: options.enableLearning !== false,
+      learningRate: options.learningRate || 0.1,
+      decayRate: options.decayRate || 0.01,
+      maxPatterns: options.maxPatterns || 1000,
+      workerCount: options.workerCount || 2,
+      ...options
+    };
+    
+    this.patterns = new Map();
+    this.accessHistory = [];
+    this.maxHistoryLength = options.maxHistoryLength || 100;
+    this.prefetchQueue = [];
+    this.activePrefetches = 0;
+    this.lastPrefetchTime = 0;
+    this.workerPool = null;
+    this.metrics = {
+      prefetchRequests: 0,
+      prefetchHits: 0,
+      prefetchMisses: 0,
+      prefetchBytes: 0,
+      patternCount: 0
+    };
+    
+    // Inizializza il worker pool
+    if (this.options.enabled) {
+      this._initializeWorkerPool();
+    }
+  }
+  
+  /**
+   * Inizializza il worker pool
+   * @private
+   */
+  _initializeWorkerPool() {
+    try {
+      // Crea il worker pool
+      this.workerPool = new WorkerPool({
+        workerCount: this.options.workerCount,
+        workerScript: path.join(__dirname, 'prefetch-worker.js')
+      });
+      
+      console.log(`PrefetchManager inizializzato con ${this.options.workerCount} worker`);
+    } catch (error) {
+      console.error('Errore durante l\'inizializzazione del worker pool:', error);
+      this.options.enabled = false;
+    }
+  }
+  
+  /**
+   * Registra un accesso alla cache
+   * @param {string} key - Chiave dell'elemento
+   */
+  recordAccess(key) {
+    if (!this.options.enabled || !this.options.enableLearning) {
+      return;
+    }
+    
+    try {
+      // Aggiungi la chiave alla cronologia
+      this.accessHistory.push({
+        key,
+        timestamp: Date.now()
+      });
+      
+      // Limita la dimensione della cronologia
+      if (this.accessHistory.length > this.maxHistoryLength) {
+        this.accessHistory.shift();
+      }
+      
+      // Aggiorna i pattern
+      this._updatePatterns();
+      
+      // Avvia il prefetching
+      this._triggerPrefetch(key);
+    } catch (error) {
+      console.error(`Errore durante la registrazione dell'accesso per la chiave ${key}:`, error);
+    }
+  }
+  
+  /**
+   * Aggiorna i pattern di accesso
+   * @private
+   */
+  _updatePatterns() {
+    if (this.accessHistory.length < 2) {
+      return;
+    }
+    
+    try {
+      // Ottieni gli ultimi due accessi
+      const lastAccess = this.accessHistory[this.accessHistory.length - 1];
+      const prevAccess = this.accessHistory[this.accessHistory.length - 2];
+      
+      // Verifica che gli accessi siano validi
+      if (!lastAccess || !prevAccess) {
+        return;
+      }
+      
+      // Verifica che gli accessi siano diversi
+      if (lastAccess.key === prevAccess.key) {
+        return;
+      }
+      
+      // Verifica che gli accessi siano abbastanza vicini
+      const timeDiff = lastAccess.timestamp - prevAccess.timestamp;
+      if (timeDiff > 5000) { // 5 secondi
+        return;
+      }
+      
+      // Aggiorna il pattern
+      const pattern = prevAccess.key;
+      const target = lastAccess.key;
+      
+      if (!this.patterns.has(pattern)) {
+        this.patterns.set(pattern, new Map());
+      }
+      
+      const targets = this.patterns.get(pattern);
+      
+      if (!targets.has(target)) {
+        targets.set(target, {
+          count: 0,
+          confidence: 0,
+          lastAccess: 0
+        });
+      }
+      
+      const targetInfo = targets.get(target);
+      
+      // Aggiorna le statistiche
+      targetInfo.count++;
+      targetInfo.lastAccess = Date.now();
+      
+      // Calcola la confidenza
+      let totalCount = 0;
+      for (const info of targets.values()) {
+        totalCount += info.count;
+      }
+      
+      for (const [t, info] of targets.entries()) {
+        info.confidence = info.count / totalCount;
+        
+        // Applica il decay
+        info.confidence *= (1 - this.options.decayRate);
+        
+        // Rimuovi i target con confidenza troppo bassa
+        if (info.confidence < 0.1) {
+          targets.delete(t);
+        }
+      }
+      
+      // Limita il numero di pattern
+      if (this.patterns.size > this.options.maxPatterns) {
+        // Rimuovi i pattern meno utilizzati
+        const patternEntries = [...this.patterns.entries()]
+          .map(([p, t]) => {
+            let totalConfidence = 0;
+            let lastAccess = 0;
+            
+            for (const info of t.values()) {
+              totalConfidence += info.confidence;
+              lastAccess = Math.max(lastAccess, info.lastAccess);
+            }
+            
+            return { pattern: p, confidence: totalConfidence, lastAccess };
+          })
+          .sort((a, b) => {
+            // Ordina per confidenza e ultimo accesso
+            if (Math.abs(a.confidence - b.confidence) < 0.1) {
+              return a.lastAccess - b.lastAccess;
+            }
+            
+            return a.confidence - b.confidence;
+          });
+        
+        // Rimuovi i pattern meno utilizzati
+        const patternsToRemove = patternEntries.slice(0, patternEntries.length - this.options.maxPatterns);
+        
+        for (const { pattern } of patternsToRemove) {
+          this.patterns.delete(pattern);
+        }
+      }
+      
+      // Aggiorna le metriche
+      this.metrics.patternCount = this.patterns.size;
+    } catch (error) {
+      console.error('Errore durante l\'aggiornamento dei pattern:', error);
+    }
+  }
+  
+  /**
+   * Avvia il prefetching
+   * @param {string} key - Chiave dell'elemento
+   * @private
+   */
+  _triggerPrefetch(key) {
+    if (!this.options.enabled) {
+      return;
+    }
+    
+    try {
+      // Verifica se è necessario rispettare il cooldown
+      const now = Date.now();
+      if (now - this.lastPrefetchTime < this.options.cooldown) {
+        return;
+      }
+      
+      // Verifica se ci sono pattern per la chiave
+      if (!this.patterns.has(key)) {
+        return;
+      }
+      
+      // Ottieni i target
+      const targets = this.patterns.get(key);
+      
+      // Filtra i target per confidenza
+      const candidateTargets = [...targets.entries()]
+        .filter(([_, info]) => info.confidence >= this.options.minConfidence)
+        .sort((a, b) => b[1].confidence - a[1].confidence);
+      
+      // Verifica se ci sono target validi
+      if (candidateTargets.length === 0) {
+        return;
+      }
+      
+      // Aggiungi i target alla coda di prefetching
+      for (const [target, info] of candidateTargets) {
+        // Verifica se il target è già in cache
+        if (this.cache.has(target)) {
+          continue;
+        }
+        
+        // Aggiungi il target alla coda
+        this.prefetchQueue.push({
+          key: target,
+          confidence: info.confidence,
+          timestamp: now
+        });
+      }
+      
+      // Aggiorna il timestamp dell'ultimo prefetch
+      this.lastPrefetchTime = now;
+      
+      // Avvia il prefetching
+      this._processPrefetchQueue();
+    } catch (error) {
+      console.error(`Errore durante l'avvio del prefetching per la chiave ${key}:`, error);
+    }
+  }
+  
+  /**
+   * Elabora la coda di prefetching
+   * @private
+   */
+  async _processPrefetchQueue() {
+    if (!this.options.enabled || this.prefetchQueue.length === 0 || this.activePrefetches >= this.options.maxConcurrent) {
+      return;
+    }
+    
+    try {
+      // Ordina la coda per confidenza
+      this.prefetchQueue.sort((a, b) => b.confidence - a.confidence);
+      
+      // Limita il numero di prefetch concorrenti
+      const availableSlots = this.options.maxConcurrent - this.activePrefetches;
+      const itemsToProcess = Math.min(availableSlots, this.prefetchQueue.length);
+      
+      // Elabora gli elementi
+      for (let i = 0; i < itemsToProcess; i++) {
+        const item = this.prefetchQueue.shift();
+        
+        // Verifica se l'elemento è valido
+        if (!item) {
+          continue;
+        }
+        
+        // Verifica se l'elemento è già in cache
+        if (this.cache.has(item.key)) {
+          continue;
+        }
+        
+        // Incrementa il contatore di prefetch attivi
+        this.activePrefetches++;
+        
+        // Esegui il prefetch
+        this._prefetchItem(item).finally(() => {
+          // Decrementa il contatore di prefetch attivi
+          this.activePrefetches--;
+          
+          // Continua a elaborare la coda
+          this._processPrefetchQueue();
+        });
+      }
+    } catch (error) {
+      console.error('Errore durante l\'elaborazione della coda di prefetching:', error);
+      
+      // Decrementa il contatore di prefetch attivi
+      this.activePrefetches = Math.max(0, this.activePrefetches - 1);
+    }
+  }
+  
+  /**
+   * Esegue il prefetch di un elemento
+   * @param {Object} item - Elemento da prefetchare
+   * @returns {Promise<boolean>} - True se il prefetch è riuscito
+   * @private
+   */
+  async _prefetchItem(item) {
+    try {
+      // Incrementa il contatore di richieste
+      this.metrics.prefetchRequests++;
+      
+      // Emetti evento
+      this.emit('prefetch', {
+        key: item.key,
+        confidence: item.confidence
+      });
+      
+      // Verifica se l'elemento è già in cache
+      if (this.cache.has(item.key)) {
+        this.metrics.prefetchHits++;
+        return true;
+      }
+      
+      // Esegui il prefetch
+      if (this.workerPool) {
+        // Usa il worker pool
+        const result = await this.workerPool.executeTask({
+          type: 'prefetch',
+          key: item.key,
+          fetcher: this.options.fetcher
+        });
+        
+        // Verifica se il prefetch è riuscito
+        if (result && result.success && result.value !== null) {
+          // Memorizza l'elemento in cache
+          await this.cache.set(item.key, result.value, {
+            ttl: this.options.ttl,
+            priority: 0.5, // Priorità media
+            tags: ['prefetched'],
+            metadata: {
+              prefetched: true,
+              confidence: item.confidence
+            }
+          });
+          
+          // Aggiorna le metriche
+          this.metrics.prefetchHits++;
+          this.metrics.prefetchBytes += result.size || 0;
+          
+          return true;
+        }
+      } else if (typeof this.options.fetcher === 'function') {
+        // Usa il fetcher direttamente
+        const value = await this.options.fetcher(item.key);
+        
+        // Verifica se il prefetch è riuscito
+        if (value !== null && value !== undefined) {
+          // Memorizza l'elemento in cache
+          await this.cache.set(item.key, value, {
+            ttl: this.options.ttl,
+            priority: 0.5, // Priorità media
+            tags: ['prefetched'],
+            metadata: {
+              prefetched: true,
+              confidence: item.confidence
+            }
+          });
+          
+          // Aggiorna le metriche
+          this.metrics.prefetchHits++;
+          
+          // Stima la dimensione
+          let size = 0;
+          if (Buffer.isBuffer(value)) {
+            size = value.length;
+          } else if (typeof value === 'string') {
+            size = Buffer.byteLength(value, 'utf8');
+          } else {
+            try {
+              size = Buffer.byteLength(JSON.stringify(value), 'utf8');
+            } catch (e) {
+              size = 1024; // Valore di default
+            }
+          }
+          
+          this.metrics.prefetchBytes += size;
+          
+          return true;
+        }
+      }
+      
+      // Prefetch fallito
+      this.metrics.prefetchMisses++;
+      
+      return false;
+    } catch (error) {
+      console.error(`Errore durante il prefetch dell'elemento ${item.key}:`, error);
+      
+      // Aggiorna le metriche
+      this.metrics.prefetchMisses++;
+      
+      // Emetti evento di errore
+      this.emit('error', {
+        operation: 'prefetch',
+        key: item.key,
+        error
+      });
+      
+      return false;
+    }
+  }
+  
+  /**
+   * Ottiene le statistiche del prefetching
+   * @returns {Object} - Statistiche
+   */
+  getStats() {
+    return {
+      enabled: this.options.enabled,
+      prefetchRequests: this.metrics.prefetchRequests,
+      prefetchHits: this.metrics.prefetchHits,
+      prefetchMisses: this.metrics.prefetchMisses,
+      hitRatio: this.metrics.prefetchHits / (this.metrics.prefetchRequests || 1),
+      prefetchBytes: this.metrics.prefetchBytes,
+      patternCount: this.metrics.patternCount,
+      queueLength: this.prefetchQueue.length,
+      activePrefetches: this.activePrefetches
+    };
+  }
+  
+  /**
+   * Chiude il prefetch manager
+   */
+  async close() {
+    // Disabilita il prefetching
+    this.options.enabled = false;
+    
+    // Svuota la coda
+    this.prefetchQueue = [];
+    
+    // Chiudi il worker pool
+    if (this.workerPool) {
+      await this.workerPool.close();
+      this.workerPool = null;
+    }
+    
+    // Rimuovi tutti i listener
+    this.removeAllListeners();
+  }
+}
+
+/**
  * Classe MultiLevelCache
  * 
- * Implementa un sistema di cache multi-livello avanzato con prefetching predittivo
- * e invalidazione selettiva basata su grafo di dipendenze.
+ * Implementa una cache multi-livello
  */
 class MultiLevelCache extends EventEmitter {
   /**
    * Costruttore
-   * @param {Object} config - Configurazione della cache
+   * @param {Object} options - Opzioni
    */
-  constructor(config = {}) {
+  constructor(options = {}) {
     super();
     
-    // Configurazione generale
-    this.config = {
-      // Configurazione generale
-      enableCompression: config.enableCompression !== false,
-      compressionThreshold: config.compressionThreshold || 1024, // Soglia in byte
-      compressionLevel: config.compressionLevel || 6, // 0-9 per zlib, 0-11 per brotli
-      compressionAlgorithm: config.compressionAlgorithm || 'zlib', // 'zlib' o 'brotli'
-      defaultTTL: config.defaultTTL || 3600, // 1 ora in secondi
-      namespacePrefix: config.namespacePrefix || 'l2cache:',
-      enableMetrics: config.enableMetrics !== false,
-      metricsInterval: config.metricsInterval || 60000, // 1 minuto
-      
-      // Configurazione L1 (memoria locale)
-      l1: {
-        enabled: config.l1?.enabled !== false,
-        maxSize: config.l1?.maxSize || 10000, // Numero di elementi
-        ttl: config.l1?.ttl || 300, // 5 minuti in secondi
-        updateAgeOnGet: config.l1?.updateAgeOnGet !== false
-      },
-      
-      // Configurazione L2 (Redis)
-      l2: {
-        enabled: config.l2?.enabled !== false,
-        host: config.l2?.host || 'localhost',
-        port: config.l2?.port || 6379,
-        password: config.l2?.password || '',
-        db: config.l2?.db || 0,
-        ttl: config.l2?.ttl || 1800, // 30 minuti in secondi
-        maxConnections: config.l2?.maxConnections || 50,
-        connectTimeout: config.l2?.connectTimeout || 10000,
-        enableCluster: config.l2?.enableCluster || false,
-        clusterNodes: config.l2?.clusterNodes || [],
-        enableTLS: config.l2?.enableTLS || false
-      },
-      
-      // Configurazione L3 (cache distribuita)
-      l3: {
-        enabled: config.l3?.enabled !== false,
-        type: config.l3?.type || 'redis-cluster', // 'redis-cluster', 'memcached', 'custom'
-        ttl: config.l3?.ttl || 86400, // 24 ore in secondi
-        nodes: config.l3?.nodes || [],
-        customImplementation: config.l3?.customImplementation || null,
-        consistencyLevel: config.l3?.consistencyLevel || 'eventual', // 'eventual', 'strong'
-        replicationFactor: config.l3?.replicationFactor || 2
-      },
-      
-      // Configurazione del prefetching predittivo
+    this.options = {
+      levels: options.levels || [
+        {
+          name: 'memory',
+          capacity: options.memoryCapacity || 1024 * 1024 * 10, // 10 MB
+          ttl: options.memoryTTL || 60000 // 1 minuto
+        },
+        {
+          name: 'persistent',
+          capacity: options.persistentCapacity || 1024 * 1024 * 100, // 100 MB
+          ttl: options.persistentTTL || 3600000 // 1 ora
+        }
+      ],
+      namespacePrefix: options.namespacePrefix || '',
+      enableCompression: options.enableCompression !== false,
+      compressionThreshold: options.compressionThreshold || 1024, // 1 KB
+      compressionAlgorithm: options.compressionAlgorithm || 'gzip',
+      enableMetrics: options.enableMetrics !== false,
+      metricsInterval: options.metricsInterval || 10000, // 10 secondi
       prefetching: {
-        enabled: config.prefetching?.enabled !== false,
-        strategy: config.prefetching?.strategy || 'pattern', // 'pattern', 'frequency', 'temporal', 'hybrid'
-        threshold: config.prefetching?.threshold || 0.7, // Soglia di confidenza (0-1)
-        maxPrefetchItems: config.prefetching?.maxPrefetchItems || 10,
-        patternLength: config.prefetching?.patternLength || 5,
-        workerCount: config.prefetching?.workerCount || 2,
-        enableAdaptivePrefetching: config.prefetching?.enableAdaptivePrefetching !== false,
-        adaptiveInterval: config.prefetching?.adaptiveInterval || 300000, // 5 minuti
-        minPrefetchConfidence: config.prefetching?.minPrefetchConfidence || 0.5
+        enabled: options.prefetching?.enabled !== false,
+        fetcher: options.prefetching?.fetcher || null,
+        ...options.prefetching
       },
-      
-      // Configurazione del grafo di dipendenze
-      dependencies: {
-        enabled: config.dependencies?.enabled !== false,
-        maxDependencies: config.dependencies?.maxDependencies || 1000,
-        maxDependenciesPerKey: config.dependencies?.maxDependenciesPerKey || 50,
-        enableTransitiveDependencies: config.dependencies?.enableTransitiveDependencies !== false,
-        maxTransitiveDepth: config.dependencies?.maxTransitiveDepth || 3
-      },
-      
-      // Configurazione della persistenza
-      persistence: {
-        enabled: config.persistence?.enabled !== false,
-        path: config.persistence?.path || './cache-persistence',
-        interval: config.persistence?.interval || 300000, // 5 minuti
-        maxFileSize: config.persistence?.maxFileSize || 100 * 1024 * 1024, // 100 MB
-        compressFiles: config.persistence?.compressFiles !== false
-      }
+      ...options
     };
     
-    // Stato interno
-    this.l1Cache = null;
-    this.l2Cache = null;
-    this.l3Cache = null;
-    this.isInitialized = false;
-    this.isShuttingDown = false;
-    this.accessPatterns = new Map(); // Mappa per il tracciamento dei pattern di accesso
-    this.dependencyGraph = new Map(); // Grafo delle dipendenze tra chiavi
-    this.prefetchQueue = []; // Coda di prefetching
-    this.prefetchWorkerPool = null; // Pool di worker per il prefetching
-    this.accessHistory = new Map(); // Storico degli accessi per chiave
-    this.prefetchStats = new Map(); // Statistiche di prefetching per chiave
-    this.persistenceTimer = null; // Timer per la persistenza
+    // Livelli della cache
+    this.levels = [];
+    
+    // Prefetch manager
+    this.prefetchManager = null;
     
     // Metriche
-    this.metrics = {
-      operations: { get: 0, set: 0, invalidate: 0 },
-      hits: { l1: 0, l2: 0, l3: 0 },
-      misses: 0,
-      errors: { l1: 0, l2: 0, l3: 0 },
-      latency: { l1: 0, l2: 0, l3: 0 },
-      prefetching: {
-        triggered: 0,
-        hits: 0,
-        misses: 0,
-        totalItems: 0,
-        successRate: 0
-      },
-      compression: { 
-        compressed: 0, 
-        uncompressed: 0, 
-        totalSavedBytes: 0,
-        compressionTime: 0,
-        decompressionTime: 0
-      },
-      dependencies: {
-        registered: 0,
-        invalidations: 0,
-        transitiveInvalidations: 0
-      },
-      persistence: {
-        writes: 0,
-        reads: 0,
-        errors: 0
-      },
-      lastReportTime: Date.now()
-    };
+    this.metrics = new PerformanceMetrics('multi_level_cache', {
+      enableMetrics: this.options.enableMetrics,
+      metricsInterval: this.options.metricsInterval
+    });
     
-    // Inizializzazione
+    // Inizializza la cache
     this._initialize();
   }
   
   /**
-   * Inizializza il sistema di cache
+   * Inizializza la cache
    * @private
    */
-  async _initialize() {
+  _initialize() {
     try {
-      console.log('Inizializzazione del sistema di cache multi-livello avanzato...');
-      
-      // Inizializza L1 (memoria locale)
-      if (this.config.l1.enabled) {
-        await this._initializeL1Cache();
+      // Crea i livelli
+      for (const levelOptions of this.options.levels) {
+        const level = new CacheLevel(levelOptions.name, {
+          ...levelOptions,
+          enableCompression: this.options.enableCompression,
+          compressionThreshold: this.options.compressionThreshold,
+          compressionAlgorithm: this.options.compressionAlgorithm
+        });
+        
+        // Gestisci gli eventi del livello
+        level.on('hit', (data) => {
+          this.metrics.incrementCounter(`${data.level}_hits`);
+          this.emit('hit', data);
+        });
+        
+        level.on('miss', (data) => {
+          this.metrics.incrementCounter(`${data.level}_misses`);
+          this.emit('miss', data);
+        });
+        
+        level.on('set', (data) => {
+          this.metrics.incrementCounter(`${data.level}_sets`);
+          this.emit('set', data);
+        });
+        
+        level.on('delete', (data) => {
+          this.metrics.incrementCounter(`${data.level}_deletes`);
+          this.emit('delete', data);
+        });
+        
+        level.on('eviction', (data) => {
+          this.metrics.incrementCounter(`${data.level}_evictions`);
+          this.emit('eviction', data);
+        });
+        
+        level.on('error', (data) => {
+          this.metrics.incrementCounter(`${data.level}_errors`);
+          this.emit('error', data);
+        });
+        
+        // Aggiungi il livello
+        this.levels.push(level);
       }
       
-      // Inizializza L2 (Redis)
-      if (this.config.l2.enabled) {
-        await this._initializeL2Cache();
+      // Inizializza il prefetch manager
+      if (this.options.prefetching.enabled) {
+        this.prefetchManager = new PrefetchManager(this, this.options.prefetching);
+        
+        // Gestisci gli eventi del prefetch manager
+        this.prefetchManager.on('prefetch', (data) => {
+          this.metrics.incrementCounter('prefetch_requests');
+          this.emit('prefetch', data);
+        });
+        
+        this.prefetchManager.on('error', (data) => {
+          this.metrics.incrementCounter('prefetch_errors');
+          this.emit('error', data);
+        });
       }
       
-      // Inizializza L3 (cache distribuita)
-      if (this.config.l3.enabled) {
-        await this._initializeL3Cache();
-      }
-      
-      // Inizializza il pool di worker per il prefetching
-      if (this.config.prefetching.enabled) {
-        await this._initializePrefetchWorkers();
-      }
-      
-      // Carica la cache persistente
-      if (this.config.persistence.enabled) {
-        await this._loadPersistentCache();
-        this._startPersistenceTimer();
-      }
-      
-      // Avvia il monitoraggio delle metriche
-      if (this.config.enableMetrics) {
-        this._startMetricsReporting();
-      }
-      
-      this.isInitialized = true;
-      console.log('Sistema di cache multi-livello avanzato inizializzato con successo');
-      
-      // Emetti evento di inizializzazione completata
-      this.emit('initialized');
-      
-      return true;
+      console.log(`MultiLevelCache inizializzata con ${this.levels.length} livelli`);
     } catch (error) {
-      console.error('Errore durante l\'inizializzazione del sistema di cache:', error);
-      this.emit('error', error);
+      console.error('Errore durante l\'inizializzazione della cache multi-livello:', error);
       throw error;
     }
   }
   
   /**
-   * Inizializza la cache L1 (memoria locale)
+   * Formatta una chiave
+   * @param {string} key - Chiave
+   * @returns {string} - Chiave formattata
    * @private
    */
-  async _initializeL1Cache() {
-    try {
-      console.log('Inizializzazione cache L1 (memoria locale)...');
-      
-      // Crea l'istanza della cache L1 utilizzando LRUCache
-      this.l1Cache = new LRUCache({
-        max: this.config.l1.maxSize,
-        ttl: this.config.l1.ttl * 1000, // Converti in millisecondi
-        updateAgeOnGet: this.config.l1.updateAgeOnGet,
-        allowStale: false
-      });
-      
-      console.log(`Cache L1 inizializzata con capacità di ${this.config.l1.maxSize} elementi`);
-      return true;
-    } catch (error) {
-      console.error('Errore durante l\'inizializzazione della cache L1:', error);
-      throw error;
+  _formatKey(key) {
+    // Verifica che la chiave sia una stringa
+    if (typeof key !== 'string') {
+      throw new Error('La chiave deve essere una stringa');
     }
+    
+    // Aggiungi il prefisso del namespace
+    return this.options.namespacePrefix + key;
   }
   
   /**
-   * Inizializza la cache L2 (Redis)
-   * @private
-   */
-  async _initializeL2Cache() {
-    try {
-      console.log('Inizializzazione cache L2 (Redis)...');
-      
-      // Importa dinamicamente il modulo Redis
-      const Redis = require('ioredis');
-      
-      // Crea l'istanza Redis
-      if (this.config.l2.enableCluster && this.config.l2.clusterNodes.length > 0) {
-        // Configurazione cluster
-        this.l2Cache = new Redis.Cluster(this.config.l2.clusterNodes, {
-          redisOptions: {
-            password: this.config.l2.password,
-            db: this.config.l2.db,
-            tls: this.config.l2.enableTLS ? {} : undefined,
-            connectTimeout: this.config.l2.connectTimeout
-          },
-          scaleReads: 'slave',
-          maxRedirections: 16,
-          retryDelayOnFailover: 100
-        });
-      } else {
-        // Configurazione standalone
-        this.l2Cache = new Redis({
-          host: this.config.l2.host,
-          port: this.config.l2.port,
-          password: this.config.l2.password,
-          db: this.config.l2.db,
-          tls: this.config.l2.enableTLS ? {} : undefined,
-          connectTimeout: this.config.l2.connectTimeout,
-          maxRetriesPerRequest: 3
-        });
-      }
-      
-      // Gestisci gli eventi Redis
-      this.l2Cache.on('error', (error) => {
-        console.error('Errore Redis L2:', error);
-        this.metrics.errors.l2++;
-        this.emit('error', { level: 'l2', error });
-      });
-      
-      this.l2Cache.on('connect', () => {
-        console.log('Connessione Redis L2 stabilita');
-      });
-      
-      this.l2Cache.on('ready', () => {
-        console.log('Redis L2 pronto');
-      });
-      
-      // Attendi che Redis sia pronto
-      await new Promise((resolve) => {
-        if (this.l2Cache.status === 'ready') {
-          resolve();
-        } else {
-          this.l2Cache.once('ready', resolve);
-        }
-      });
-      
-      console.log(`Cache L2 inizializzata con Redis ${this.config.l2.enableCluster ? 'Cluster' : 'Standalone'}`);
-      return true;
-    } catch (error) {
-      console.error('Errore durante l\'inizializzazione della cache L2:', error);
-      throw error;
-    }
-  }
-  
-  /**
-   * Inizializza la cache L3 (cache distribuita)
-   * @private
-   */
-  async _initializeL3Cache() {
-    try {
-      console.log(`Inizializzazione cache L3 (${this.config.l3.type})...`);
-      
-      switch (this.config.l3.type) {
-        case 'redis-cluster':
-          await this._initializeL3RedisCluster();
-          break;
-          
-        case 'memcached':
-          await this._initializeL3Memcached();
-          break;
-          
-        case 'custom':
-          if (this.config.l3.customImplementation) {
-            this.l3Cache = this.config.l3.customImplementation;
-          } else {
-            throw new Error('Custom implementation non fornita per la cache L3');
-          }
-          break;
-          
-        default:
-          throw new Error(`Tipo di cache L3 non supportato: ${this.config.l3.type}`);
-      }
-      
-      console.log(`Cache L3 inizializzata con ${this.config.l3.type}`);
-      return true;
-    } catch (error) {
-      console.error('Errore durante l\'inizializzazione della cache L3:', error);
-      throw error;
-    }
-  }
-  
-  /**
-   * Inizializza la cache L3 con Redis Cluster
-   * @private
-   */
-  async _initializeL3RedisCluster() {
-    // Importa dinamicamente il modulo Redis
-    const Redis = require('ioredis');
-    
-    // Verifica che ci siano nodi configurati
-    if (!this.config.l3.nodes || this.config.l3.nodes.length === 0) {
-      throw new Error('Nessun nodo configurato per Redis Cluster L3');
-    }
-    
-    // Crea l'istanza Redis Cluster
-    this.l3Cache = new Redis.Cluster(this.config.l3.nodes, {
-      scaleReads: 'slave',
-      maxRedirections: 16,
-      retryDelayOnFailover: 100,
-      clusterRetryStrategy: (times) => Math.min(times * 100, 3000)
-    });
-    
-    // Gestisci gli eventi Redis
-    this.l3Cache.on('error', (error) => {
-      console.error('Errore Redis Cluster L3:', error);
-      this.metrics.errors.l3++;
-      this.emit('error', { level: 'l3', error });
-    });
-    
-    // Attendi che il cluster sia pronto
-    await new Promise((resolve) => {
-      if (this.l3Cache.status === 'ready') {
-        resolve();
-      } else {
-        this.l3Cache.once('ready', resolve);
-      }
-    });
-  }
-  
-  /**
-   * Inizializza la cache L3 con Memcached
-   * @private
-   */
-  async _initializeL3Memcached() {
-    // Importa dinamicamente il modulo Memcached
-    const Memcached = require('memcached');
-    
-    // Verifica che ci siano nodi configurati
-    if (!this.config.l3.nodes || this.config.l3.nodes.length === 0) {
-      throw new Error('Nessun nodo configurato per Memcached L3');
-    }
-    
-    // Crea l'istanza Memcached
-    const servers = this.config.l3.nodes.join(',');
-    this.l3Cache = new Memcached(servers, {
-      retries: 3,
-      retry: 1000,
-      timeout: 5000,
-      poolSize: 10
-    });
-    
-    // Promisify dei metodi Memcached
-    this.l3Cache.getAsync = promisify(this.l3Cache.get).bind(this.l3Cache);
-    this.l3Cache.setAsync = promisify(this.l3Cache.set).bind(this.l3Cache);
-    this.l3Cache.delAsync = promisify(this.l3Cache.del).bind(this.l3Cache);
-    this.l3Cache.flushAsync = promisify(this.l3Cache.flush).bind(this.l3Cache);
-    
-    // Gestisci gli eventi Memcached
-    this.l3Cache.on('failure', (details) => {
-      console.error('Errore Memcached L3:', details);
-      this.metrics.errors.l3++;
-      this.emit('error', { level: 'l3', error: details });
-    });
-    
-    this.l3Cache.on('reconnecting', (details) => {
-      console.log('Riconnessione Memcached L3:', details);
-    });
-  }
-  
-  /**
-   * Inizializza i worker per il prefetching
-   * @private
-   */
-  async _initializePrefetchWorkers() {
-    try {
-      console.log('Inizializzazione worker per il prefetching...');
-      
-      // Crea il pool di worker
-      this.prefetchWorkerPool = new WorkerPool({
-        workerCount: this.config.prefetching.workerCount,
-        workerScript: path.join(__dirname, 'prefetch-worker.js'),
-        workerOptions: {
-          prefetchConfig: {
-            strategy: this.config.prefetching.strategy,
-            threshold: this.config.prefetching.threshold,
-            patternLength: this.config.prefetching.patternLength,
-            maxPrefetchItems: this.config.prefetching.maxPrefetchItems
-          }
-        },
-        enableMetrics: true,
-        metricsInterval: this.config.metricsInterval
-      });
-      
-      // Gestisci gli eventi del pool di worker
-      this.prefetchWorkerPool.on('metrics', (metrics) => {
-        // Aggiorna le metriche di prefetching
-        this.metrics.prefetching.triggered += metrics.tasksCompleted;
-      });
-      
-      console.log(`Worker per il prefetching inizializzati (${this.config.prefetching.workerCount} worker)`);
-      return true;
-    } catch (error) {
-      console.error('Errore durante l\'inizializzazione dei worker per il prefetching:', error);
-      throw error;
-    }
-  }
-  
-  /**
-   * Carica la cache persistente dal disco
-   * @private
-   */
-  async _loadPersistentCache() {
-    try {
-      console.log('Caricamento della cache persistente...');
-      
-      // Verifica che la directory esista
-      try {
-        await fs.mkdir(this.config.persistence.path, { recursive: true });
-      } catch (error) {
-        if (error.code !== 'EEXIST') {
-          throw error;
-        }
-      }
-      
-      // Leggi i file di cache
-      const files = await fs.readdir(this.config.persistence.path);
-      const cacheFiles = files.filter(file => file.endsWith('.cache'));
-      
-      if (cacheFiles.length === 0) {
-        console.log('Nessun file di cache trovato');
-        return;
-      }
-      
-      // Carica i file di cache
-      for (const file of cacheFiles) {
-        try {
-          const filePath = path.join(this.config.persistence.path, file);
-          const stats = await fs.stat(filePath);
-          
-          // Salta i file troppo grandi
-          if (stats.size > this.config.persistence.maxFileSize) {
-            console.warn(`File di cache troppo grande, saltato: ${file}`);
-            continue;
-          }
-          
-          // Leggi il file
-          let data = await fs.readFile(filePath);
-          
-          // Decomprimi il file se necessario
-          if (file.endsWith('.cache.gz')) {
-            data = await promisify(zlib.gunzip)(data);
-          }
-          
-          // Parsa il contenuto
-          const cacheData = JSON.parse(data.toString('utf8'));
-          
-          // Carica i dati nella cache
-          for (const [key, value] of Object.entries(cacheData)) {
-            if (value.expiry && value.expiry < Date.now()) {
-              continue; // Salta le chiavi scadute
-            }
-            
-            // Decodifica il valore se è in base64
-            let decodedValue = value.value;
-            if (value.encoding === 'base64') {
-              decodedValue = Buffer.from(value.value, 'base64');
-            }
-            
-            // Decomprimi il valore se è compresso
-            if (value.compressed) {
-              try {
-                if (value.algorithm === 'brotli') {
-                  decodedValue = await brotliDecompressAsync(decodedValue);
-                } else {
-                  decodedValue = await decompressAsync(decodedValue);
-                }
-                
-                // Converti il buffer in stringa e poi in oggetto
-                decodedValue = JSON.parse(decodedValue.toString('utf8'));
-              } catch (error) {
-                console.error(`Errore durante la decompressione del valore per la chiave ${key}:`, error);
-                continue;
-              }
-            }
-            
-            // Calcola il TTL rimanente
-            const ttl = value.expiry ? Math.max(0, (value.expiry - Date.now()) / 1000) : this.config.defaultTTL;
-            
-            // Memorizza il valore nella cache
-            await this.set(key, decodedValue, { ttl });
-            
-            // Ripristina le dipendenze
-            if (value.dependencies && Array.isArray(value.dependencies)) {
-              this.dependencyGraph.set(key, new Set(value.dependencies));
-            }
-          }
-          
-          this.metrics.persistence.reads++;
-        } catch (error) {
-          console.error(`Errore durante il caricamento del file di cache ${file}:`, error);
-          this.metrics.persistence.errors++;
-        }
-      }
-      
-      console.log(`Cache persistente caricata (${this.metrics.persistence.reads} file)`);
-    } catch (error) {
-      console.error('Errore durante il caricamento della cache persistente:', error);
-      this.metrics.persistence.errors++;
-    }
-  }
-  
-  /**
-   * Avvia il timer per la persistenza della cache
-   * @private
-   */
-  _startPersistenceTimer() {
-    this.persistenceTimer = setInterval(() => {
-      this._persistCache();
-    }, this.config.persistence.interval);
-    
-    // Assicurati che il timer non impedisca al processo di terminare
-    this.persistenceTimer.unref();
-  }
-  
-  /**
-   * Persiste la cache su disco
-   * @private
-   */
-  async _persistCache() {
-    try {
-      console.log('Persistenza della cache...');
-      
-      // Verifica che la directory esista
-      try {
-        await fs.mkdir(this.config.persistence.path, { recursive: true });
-      } catch (error) {
-        if (error.code !== 'EEXIST') {
-          throw error;
-        }
-      }
-      
-      // Prepara i dati da persistere
-      const cacheData = {};
-      let totalItems = 0;
-      
-      // Raccogli i dati dalla cache L1
-      if (this.l1Cache) {
-        for (const [key, value] of this.l1Cache.entries()) {
-          const normalizedKey = this._normalizeKey(key);
-          const ttl = this.l1Cache.getRemainingTTL(key);
-          const expiry = ttl > 0 ? Date.now() + ttl : null;
-          
-          // Prepara il valore per la persistenza
-          let persistValue;
-          let encoding = null;
-          let compressed = false;
-          let algorithm = null;
-          
-          // Comprimi il valore se necessario
-          if (this.config.enableCompression && typeof value === 'object') {
-            try {
-              const stringValue = JSON.stringify(value);
-              
-              if (Buffer.byteLength(stringValue, 'utf8') >= this.config.compressionThreshold) {
-                const startTime = Date.now();
-                
-                if (this.config.compressionAlgorithm === 'brotli') {
-                  const compressedValue = await brotliCompressAsync(Buffer.from(stringValue, 'utf8'));
-                  persistValue = compressedValue.toString('base64');
-                  compressed = true;
-                  algorithm = 'brotli';
-                } else {
-                  const compressedValue = await compressAsync(stringValue);
-                  persistValue = compressedValue.toString('base64');
-                  compressed = true;
-                  algorithm = 'zlib';
-                }
-                
-                encoding = 'base64';
-              } else {
-                persistValue = value;
-              }
-            } catch (error) {
-              console.error(`Errore durante la compressione del valore per la chiave ${normalizedKey}:`, error);
-              persistValue = value;
-            }
-          } else {
-            persistValue = value;
-          }
-          
-          // Aggiungi le dipendenze
-          const dependencies = this.dependencyGraph.has(normalizedKey) 
-            ? Array.from(this.dependencyGraph.get(normalizedKey))
-            : null;
-          
-          // Memorizza il valore
-          cacheData[normalizedKey] = {
-            value: persistValue,
-            expiry,
-            encoding,
-            compressed,
-            algorithm,
-            dependencies
-          };
-          
-          totalItems++;
-          
-          // Limita il numero di elementi per evitare file troppo grandi
-          if (totalItems >= 10000) {
-            break;
-          }
-        }
-      }
-      
-      // Se non ci sono dati da persistere, esci
-      if (totalItems === 0) {
-        console.log('Nessun dato da persistere');
-        return;
-      }
-      
-      // Crea il file di cache
-      const timestamp = Date.now();
-      const fileName = `cache_${timestamp}.cache${this.config.persistence.compressFiles ? '.gz' : ''}`;
-      const filePath = path.join(this.config.persistence.path, fileName);
-      
-      // Serializza i dati
-      const jsonData = JSON.stringify(cacheData);
-      
-      // Comprimi il file se necessario
-      if (this.config.persistence.compressFiles) {
-        const compressedData = await promisify(zlib.gzip)(Buffer.from(jsonData, 'utf8'));
-        await fs.writeFile(filePath, compressedData);
-      } else {
-        await fs.writeFile(filePath, jsonData, 'utf8');
-      }
-      
-      this.metrics.persistence.writes++;
-      
-      // Elimina i file vecchi
-      const files = await fs.readdir(this.config.persistence.path);
-      const cacheFiles = files.filter(file => file.endsWith('.cache') || file.endsWith('.cache.gz'));
-      
-      // Ordina i file per data (dal più vecchio al più recente)
-      const sortedFiles = cacheFiles.sort((a, b) => {
-        const timestampA = parseInt(a.match(/cache_(\d+)\.cache/)?.[1] || '0');
-        const timestampB = parseInt(b.match(/cache_(\d+)\.cache/)?.[1] || '0');
-        return timestampA - timestampB;
-      });
-      
-      // Mantieni solo gli ultimi 5 file
-      if (sortedFiles.length > 5) {
-        const filesToDelete = sortedFiles.slice(0, sortedFiles.length - 5);
-        
-        for (const file of filesToDelete) {
-          try {
-            await fs.unlink(path.join(this.config.persistence.path, file));
-          } catch (error) {
-            console.error(`Errore durante l'eliminazione del file ${file}:`, error);
-          }
-        }
-      }
-      
-      console.log(`Cache persistita (${totalItems} elementi)`);
-    } catch (error) {
-      console.error('Errore durante la persistenza della cache:', error);
-      this.metrics.persistence.errors++;
-    }
-  }
-  
-  /**
-   * Avvia il reporting delle metriche
-   * @private
-   */
-  _startMetricsReporting() {
-    setInterval(() => {
-      const now = Date.now();
-      const elapsedSeconds = (now - this.metrics.lastReportTime) / 1000;
-      
-      if (elapsedSeconds > 0) {
-        // Calcola le operazioni al secondo
-        const opsPerSecond = {
-          get: this.metrics.operations.get / elapsedSeconds,
-          set: this.metrics.operations.set / elapsedSeconds,
-          invalidate: this.metrics.operations.invalidate / elapsedSeconds
-        };
-        
-        // Calcola l'hit rate
-        const totalHits = this.metrics.hits.l1 + this.metrics.hits.l2 + this.metrics.hits.l3;
-        const totalOps = totalHits + this.metrics.misses;
-        const hitRate = totalOps > 0 ? (totalHits / totalOps) * 100 : 0;
-        
-        // Calcola la distribuzione degli hit
-        const hitDistribution = {
-          l1: totalHits > 0 ? (this.metrics.hits.l1 / totalHits) * 100 : 0,
-          l2: totalHits > 0 ? (this.metrics.hits.l2 / totalHits) * 100 : 0,
-          l3: totalHits > 0 ? (this.metrics.hits.l3 / totalHits) * 100 : 0
-        };
-        
-        // Calcola il rapporto di compressione
-        const compressionRatio = this.metrics.compression.uncompressed > 0 
-          ? this.metrics.compression.uncompressed / Math.max(1, this.metrics.compression.compressed) 
-          : 0;
-        
-        // Calcola il tasso di successo del prefetching
-        const prefetchSuccessRate = this.metrics.prefetching.totalItems > 0
-          ? (this.metrics.prefetching.hits / this.metrics.prefetching.totalItems) * 100
-          : 0;
-        
-        // Log delle metriche
-        console.log(`Cache metrics - Hit rate: ${hitRate.toFixed(2)}%, Ops/sec: ${(opsPerSecond.get + opsPerSecond.set + opsPerSecond.invalidate).toFixed(2)}`);
-        console.log(`Hit distribution - L1: ${hitDistribution.l1.toFixed(2)}%, L2: ${hitDistribution.l2.toFixed(2)}%, L3: ${hitDistribution.l3.toFixed(2)}%`);
-        console.log(`Latency (ms) - L1: ${this.metrics.latency.l1.toFixed(2)}, L2: ${this.metrics.latency.l2.toFixed(2)}, L3: ${this.metrics.latency.l3.toFixed(2)}`);
-        console.log(`Prefetching - Success rate: ${prefetchSuccessRate.toFixed(2)}%, Triggered: ${this.metrics.prefetching.triggered}, Hits: ${this.metrics.prefetching.hits}`);
-        console.log(`Dependencies - Registered: ${this.metrics.dependencies.registered}, Invalidations: ${this.metrics.dependencies.invalidations}, Transitive: ${this.metrics.dependencies.transitiveInvalidations}`);
-        
-        if (this.config.enableCompression) {
-          console.log(`Compression - Ratio: ${compressionRatio.toFixed(2)}x, Compressed: ${this.metrics.compression.compressed}, Saved: ${(this.metrics.compression.totalSavedBytes / 1024).toFixed(2)} KB`);
-        }
-        
-        if (this.config.persistence.enabled) {
-          console.log(`Persistence - Writes: ${this.metrics.persistence.writes}, Reads: ${this.metrics.persistence.reads}, Errors: ${this.metrics.persistence.errors}`);
-        }
-        
-        // Emetti evento con le metriche
-        this.emit('metrics', {
-          timestamp: now,
-          opsPerSecond,
-          hitRate,
-          hitDistribution,
-          latency: this.metrics.latency,
-          prefetching: {
-            successRate: prefetchSuccessRate,
-            triggered: this.metrics.prefetching.triggered,
-            hits: this.metrics.prefetching.hits,
-            misses: this.metrics.prefetching.misses,
-            totalItems: this.metrics.prefetching.totalItems
-          },
-          compression: {
-            ratio: compressionRatio,
-            compressed: this.metrics.compression.compressed,
-            uncompressed: this.metrics.compression.uncompressed,
-            savedBytes: this.metrics.compression.totalSavedBytes
-          },
-          dependencies: {
-            registered: this.metrics.dependencies.registered,
-            invalidations: this.metrics.dependencies.invalidations,
-            transitiveInvalidations: this.metrics.dependencies.transitiveInvalidations
-          },
-          persistence: {
-            writes: this.metrics.persistence.writes,
-            reads: this.metrics.persistence.reads,
-            errors: this.metrics.persistence.errors
-          },
-          errors: this.metrics.errors
-        });
-        
-        // Resetta i contatori
-        this.metrics.operations = { get: 0, set: 0, invalidate: 0 };
-        this.metrics.hits = { l1: 0, l2: 0, l3: 0 };
-        this.metrics.misses = 0;
-        this.metrics.errors = { l1: 0, l2: 0, l3: 0 };
-        this.metrics.latency = { l1: 0, l2: 0, l3: 0 };
-        this.metrics.prefetching = {
-          triggered: 0,
-          hits: 0,
-          misses: 0,
-          totalItems: 0,
-          successRate: 0
-        };
-        this.metrics.compression = {
-          compressed: 0,
-          uncompressed: 0,
-          totalSavedBytes: 0,
-          compressionTime: 0,
-          decompressionTime: 0
-        };
-        this.metrics.dependencies = {
-          registered: 0,
-          invalidations: 0,
-          transitiveInvalidations: 0
-        };
-        this.metrics.persistence = {
-          writes: 0,
-          reads: 0,
-          errors: 0
-        };
-        this.metrics.lastReportTime = now;
-      }
-    }, this.config.metricsInterval);
-  }
-  
-  /**
-   * Genera una chiave di cache normalizzata
-   * @param {string} key - Chiave originale
-   * @returns {string} Chiave normalizzata
-   * @private
-   */
-  _normalizeKey(key) {
-    // Verifica se la chiave è già normalizzata
-    if (key.startsWith(this.config.namespacePrefix)) {
-      return key;
-    }
-    
-    // Normalizza la chiave
-    return `${this.config.namespacePrefix}${key}`;
-  }
-  
-  /**
-   * Comprime un valore se necessario
-   * @param {*} value - Valore da comprimere
-   * @param {string} key - Chiave associata al valore (per logging)
-   * @returns {Promise<Object>} Oggetto con valore compresso e metadati
-   * @private
-   */
-  async _compressValue(value, key) {
-    if (!this.config.enableCompression) {
-      return { value, compressed: false, originalSize: 0, compressedSize: 0 };
-    }
-    
-    try {
-      // Converti il valore in stringa JSON se non è già una stringa
-      const stringValue = typeof value === 'string' ? value : JSON.stringify(value);
-      const originalSize = Buffer.byteLength(stringValue, 'utf8');
-      
-      // Verifica se il valore supera la soglia di compressione
-      if (originalSize < this.config.compressionThreshold) {
-        return { value, compressed: false, originalSize, compressedSize: originalSize };
-      }
-      
-      // Misura il tempo di compressione
-      const startTime = Date.now();
-      
-      // Comprimi il valore
-      let compressedValue;
-      if (this.config.compressionAlgorithm === 'brotli') {
-        compressedValue = await brotliCompressAsync(Buffer.from(stringValue, 'utf8'), {
-          params: {
-            [zlib.constants.BROTLI_PARAM_QUALITY]: this.config.compressionLevel
-          }
-        });
-      } else {
-        // Default: zlib
-        compressedValue = await compressAsync(stringValue, {
-          level: this.config.compressionLevel
-        });
-      }
-      
-      // Calcola il tempo di compressione
-      const compressionTime = Date.now() - startTime;
-      
-      // Calcola la dimensione compressa
-      const compressedSize = compressedValue.length;
-      
-      // Verifica se la compressione è efficace
-      if (compressedSize >= originalSize) {
-        // La compressione non è efficace, usa il valore originale
-        return { value, compressed: false, originalSize, compressedSize: originalSize };
-      }
-      
-      // Aggiorna le metriche
-      this.metrics.compression.compressed++;
-      this.metrics.compression.uncompressed += originalSize;
-      this.metrics.compression.totalSavedBytes += (originalSize - compressedSize);
-      this.metrics.compression.compressionTime += compressionTime;
-      
-      // Restituisci il valore compresso con metadati
-      return {
-        value: compressedValue,
-        compressed: true,
-        algorithm: this.config.compressionAlgorithm,
-        originalSize,
-        compressedSize,
-        compressionTime
-      };
-    } catch (error) {
-      console.error(`Errore durante la compressione del valore per la chiave ${key}:`, error);
-      // In caso di errore, usa il valore originale
-      return { value, compressed: false, originalSize: 0, compressedSize: 0 };
-    }
-  }
-  
-  /**
-   * Decomprime un valore se necessario
-   * @param {*} data - Dati da decomprimere
-   * @param {string} key - Chiave associata al valore (per logging)
-   * @returns {Promise<*>} Valore decompresso
-   * @private
-   */
-  async _decompressValue(data, key) {
-    if (!data || !data.compressed) {
-      return data.value;
-    }
-    
-    try {
-      // Misura il tempo di decompressione
-      const startTime = Date.now();
-      
-      // Decomprime il valore
-      let decompressedValue;
-      if (data.algorithm === 'brotli') {
-        decompressedValue = await brotliDecompressAsync(data.value);
-      } else {
-        // Default: zlib
-        decompressedValue = await decompressAsync(data.value);
-      }
-      
-      // Calcola il tempo di decompressione
-      const decompressionTime = Date.now() - startTime;
-      
-      // Aggiorna le metriche
-      this.metrics.compression.decompressionTime += decompressionTime;
-      
-      // Converti il buffer in stringa
-      const stringValue = decompressedValue.toString('utf8');
-      
-      // Prova a convertire la stringa in JSON se possibile
-      try {
-        return JSON.parse(stringValue);
-      } catch (e) {
-        // Se non è JSON valido, restituisci la stringa
-        return stringValue;
-      }
-    } catch (error) {
-      console.error(`Errore durante la decompressione del valore per la chiave ${key}:`, error);
-      // In caso di errore, restituisci il valore compresso
-      return data.value;
-    }
-  }
-  
-  /**
-   * Aggiorna il pattern di accesso per una chiave
-   * @param {string} key - Chiave acceduta
-   * @private
-   */
-  _updateAccessPattern(key) {
-    if (!this.config.prefetching.enabled) {
-      return;
-    }
-    
-    // Ottieni l'ultimo pattern di accesso
-    const lastAccesses = this.accessHistory.get('__last_accesses__') || [];
-    
-    // Aggiungi la chiave corrente al pattern
-    lastAccesses.push(key);
-    
-    // Mantieni solo le ultime N chiavi
-    if (lastAccesses.length > this.config.prefetching.patternLength) {
-      lastAccesses.shift();
-    }
-    
-    // Aggiorna lo storico
-    this.accessHistory.set('__last_accesses__', lastAccesses);
-    
-    // Se abbiamo abbastanza chiavi per formare un pattern, aggiornalo
-    if (lastAccesses.length >= 2) {
-      // Crea il pattern (tutte le chiavi tranne l'ultima)
-      const pattern = lastAccesses.slice(0, -1).join(',');
-      const nextKey = lastAccesses[lastAccesses.length - 1];
-      
-      // Aggiorna la mappa dei pattern
-      if (!this.accessPatterns.has(pattern)) {
-        this.accessPatterns.set(pattern, new Map());
-      }
-      
-      const nextKeys = this.accessPatterns.get(pattern);
-      nextKeys.set(nextKey, (nextKeys.get(nextKey) || 0) + 1);
-      
-      // Limita la dimensione della mappa dei pattern
-      if (this.accessPatterns.size > 1000) {
-        // Rimuovi il pattern meno utilizzato
-        let minPattern = null;
-        let minCount = Infinity;
-        
-        for (const [p, next] of this.accessPatterns.entries()) {
-          const count = Array.from(next.values()).reduce((sum, c) => sum + c, 0);
-          if (count < minCount) {
-            minCount = count;
-            minPattern = p;
-          }
-        }
-        
-        if (minPattern) {
-          this.accessPatterns.delete(minPattern);
-        }
-      }
-    }
-    
-    // Aggiorna lo storico degli accessi per la chiave
-    if (!this.accessHistory.has(key)) {
-      this.accessHistory.set(key, []);
-    }
-    
-    const keyHistory = this.accessHistory.get(key);
-    keyHistory.push(Date.now());
-    
-    // Mantieni solo gli ultimi 100 accessi
-    if (keyHistory.length > 100) {
-      keyHistory.shift();
-    }
-    
-    // Avvia il prefetching se abbiamo un pattern completo
-    if (lastAccesses.length === this.config.prefetching.patternLength) {
-      this._triggerPrefetch(lastAccesses);
-    }
-  }
-  
-  /**
-   * Avvia il prefetching basato su un pattern di accesso
-   * @param {Array<string>} pattern - Pattern di accesso
-   * @private
-   */
-  async _triggerPrefetch(pattern) {
-    if (!this.config.prefetching.enabled || !this.prefetchWorkerPool) {
-      return;
-    }
-    
-    try {
-      // Crea il pattern (tutte le chiavi tranne l'ultima)
-      const patternKey = pattern.slice(0, -1).join(',');
-      
-      // Verifica se abbiamo un pattern valido
-      if (!this.accessPatterns.has(patternKey)) {
-        return;
-      }
-      
-      // Ottieni le chiavi più probabili
-      const nextKeys = this.accessPatterns.get(patternKey);
-      const totalCount = Array.from(nextKeys.values()).reduce((sum, count) => sum + count, 0);
-      
-      // Calcola le probabilità e seleziona le chiavi con probabilità superiore alla soglia
-      const candidates = [];
-      
-      for (const [key, count] of nextKeys.entries()) {
-        const probability = count / totalCount;
-        
-        if (probability >= this.config.prefetching.threshold) {
-          candidates.push({ key, probability });
-        }
-      }
-      
-      // Ordina i candidati per probabilità (dal più probabile al meno probabile)
-      candidates.sort((a, b) => b.probability - a.probability);
-      
-      // Limita il numero di chiavi da prefetchare
-      const keysToFetch = candidates
-        .slice(0, this.config.prefetching.maxPrefetchItems)
-        .map(c => c.key);
-      
-      // Se non ci sono chiavi da prefetchare, esci
-      if (keysToFetch.length === 0) {
-        return;
-      }
-      
-      // Aggiorna le metriche
-      this.metrics.prefetching.triggered++;
-      this.metrics.prefetching.totalItems += keysToFetch.length;
-      
-      // Esegui il prefetching in background
-      this.prefetchWorkerPool.executeTask('prefetch', {
-        keys: keysToFetch,
-        pattern: patternKey,
-        timestamp: Date.now()
-      }).then(result => {
-        // Aggiorna le statistiche di prefetching
-        if (result && result.fetched) {
-          for (const key of result.fetched) {
-            // Aggiorna le statistiche
-            if (!this.prefetchStats.has(key)) {
-              this.prefetchStats.set(key, { hits: 0, misses: 0 });
-            }
-          }
-        }
-      }).catch(error => {
-        console.error('Errore durante il prefetching:', error);
-      });
-      
-      // Prefetch immediato per le chiavi più probabili
-      for (const key of keysToFetch.slice(0, 3)) {
-        // Verifica se la chiave è già in cache
-        const normalizedKey = this._normalizeKey(key);
-        const inCache = await this._checkInCache(normalizedKey);
-        
-        // Se non è in cache, caricala
-        if (!inCache) {
-          this.get(key).catch(() => {
-            // Ignora gli errori durante il prefetching
-          });
-        }
-      }
-    } catch (error) {
-      console.error('Errore durante il trigger del prefetching:', error);
-    }
-  }
-  
-  /**
-   * Verifica se una chiave è presente in cache
-   * @param {string} key - Chiave da verificare
-   * @returns {Promise<boolean>} True se la chiave è in cache
-   * @private
-   */
-  async _checkInCache(key) {
-    // Verifica in L1
-    if (this.l1Cache && this.l1Cache.has(key)) {
-      return true;
-    }
-    
-    // Verifica in L2
-    if (this.l2Cache) {
-      try {
-        const exists = await this.l2Cache.exists(key);
-        if (exists) {
-          return true;
-        }
-      } catch (error) {
-        // Ignora gli errori
-      }
-    }
-    
-    // Verifica in L3
-    if (this.l3Cache) {
-      try {
-        if (this.l3Cache.getAsync) {
-          const value = await this.l3Cache.getAsync(key);
-          return value !== undefined && value !== null;
-        } else if (this.l3Cache.exists) {
-          const exists = await this.l3Cache.exists(key);
-          return exists;
-        }
-      } catch (error) {
-        // Ignora gli errori
-      }
-    }
-    
-    return false;
-  }
-  
-  /**
-   * Registra una dipendenza tra chiavi
-   * @param {string} key - Chiave dipendente
-   * @param {string|Array<string>} dependencies - Chiave o array di chiavi da cui dipende
-   * @returns {Promise<boolean>} True se la registrazione ha avuto successo
-   */
-  async registerDependency(key, dependencies) {
-    if (!this.config.dependencies.enabled) {
-      return false;
-    }
-    
-    try {
-      // Normalizza la chiave
-      const normalizedKey = this._normalizeKey(key);
-      
-      // Converti le dipendenze in array se necessario
-      const deps = Array.isArray(dependencies) ? dependencies : [dependencies];
-      
-      // Normalizza le dipendenze
-      const normalizedDeps = deps.map(dep => this._normalizeKey(dep));
-      
-      // Verifica se la chiave esiste già nel grafo
-      if (!this.dependencyGraph.has(normalizedKey)) {
-        this.dependencyGraph.set(normalizedKey, new Set());
-      }
-      
-      // Ottieni il set di dipendenze
-      const dependencySet = this.dependencyGraph.get(normalizedKey);
-      
-      // Aggiungi le nuove dipendenze
-      for (const dep of normalizedDeps) {
-        // Evita dipendenze circolari
-        if (dep === normalizedKey) {
-          continue;
-        }
-        
-        // Verifica se abbiamo raggiunto il limite di dipendenze per chiave
-        if (dependencySet.size >= this.config.dependencies.maxDependenciesPerKey) {
-          console.warn(`Limite di dipendenze raggiunto per la chiave ${normalizedKey}`);
-          break;
-        }
-        
-        dependencySet.add(dep);
-        this.metrics.dependencies.registered++;
-      }
-      
-      // Verifica se abbiamo raggiunto il limite di dipendenze totali
-      if (this.dependencyGraph.size > this.config.dependencies.maxDependencies) {
-        // Rimuovi le chiavi meno utilizzate
-        const keysToRemove = [];
-        
-        for (const [graphKey] of this.dependencyGraph.entries()) {
-          // Verifica se la chiave è stata acceduta di recente
-          if (!this.accessHistory.has(graphKey)) {
-            keysToRemove.push(graphKey);
-          }
-        }
-        
-        // Rimuovi le chiavi
-        for (const keyToRemove of keysToRemove.slice(0, this.dependencyGraph.size - this.config.dependencies.maxDependencies)) {
-          this.dependencyGraph.delete(keyToRemove);
-        }
-      }
-      
-      return true;
-    } catch (error) {
-      console.error('Errore durante la registrazione della dipendenza:', error);
-      return false;
-    }
-  }
-  
-  /**
-   * Invalida tutte le chiavi dipendenti da una chiave
-   * @param {string} key - Chiave da cui dipendono altre chiavi
-   * @param {number} depth - Profondità massima per le dipendenze transitive
-   * @returns {Promise<Array<string>>} Array di chiavi invalidate
-   * @private
-   */
-  async _invalidateDependents(key, depth = 0) {
-    if (!this.config.dependencies.enabled) {
-      return [];
-    }
-    
-    try {
-      // Normalizza la chiave
-      const normalizedKey = this._normalizeKey(key);
-      
-      // Trova tutte le chiavi che dipendono da questa
-      const dependents = [];
-      
-      for (const [depKey, deps] of this.dependencyGraph.entries()) {
-        if (deps.has(normalizedKey)) {
-          dependents.push(depKey);
-        }
-      }
-      
-      // Invalida tutte le chiavi dipendenti
-      const invalidated = [];
-      
-      for (const dependent of dependents) {
-        // Invalida la chiave
-        await this.invalidate(dependent);
-        invalidated.push(dependent);
-        
-        // Aggiorna le metriche
-        this.metrics.dependencies.invalidations++;
-        
-        // Se abilitato, invalida anche le dipendenze transitive
-        if (this.config.dependencies.enableTransitiveDependencies && depth < this.config.dependencies.maxTransitiveDepth) {
-          const transitive = await this._invalidateDependents(dependent, depth + 1);
-          invalidated.push(...transitive);
-          
-          // Aggiorna le metriche
-          this.metrics.dependencies.transitiveInvalidations += transitive.length;
-        }
-      }
-      
-      return invalidated;
-    } catch (error) {
-      console.error('Errore durante l\'invalidazione delle dipendenze:', error);
-      return [];
-    }
-  }
-  
-  /**
-   * Ottiene un valore dalla cache
-   * @param {string} key - Chiave da cercare
+   * Imposta un elemento nella cache
+   * @param {string} key - Chiave dell'elemento
+   * @param {*} value - Valore dell'elemento
    * @param {Object} options - Opzioni
-   * @returns {Promise<*>} Valore trovato o null se non trovato
+   * @returns {Promise<boolean>} - True se l'operazione è riuscita
    */
-  async get(key, options = {}) {
-    // Verifica che il sistema sia inizializzato
-    if (!this.isInitialized) {
-      throw new Error('Sistema di cache non inizializzato');
-    }
-    
-    // Normalizza la chiave
-    const normalizedKey = this._normalizeKey(key);
-    
-    // Aggiorna le metriche
-    this.metrics.operations.get++;
-    
-    // Aggiorna il pattern di accesso
-    this._updateAccessPattern(normalizedKey);
+  async set(key, value, options = {}) {
+    const startTime = performance.now();
     
     try {
-      // Cerca nella cache L1 (memoria locale)
-      if (this.config.l1.enabled && this.l1Cache) {
-        const startTime = Date.now();
-        const value = this.l1Cache.get(normalizedKey);
-        const endTime = Date.now();
+      // Formatta la chiave
+      const formattedKey = this._formatKey(key);
+      
+      // Verifica che il valore non sia undefined
+      if (value === undefined) {
+        throw new Error('Il valore non può essere undefined');
+      }
+      
+      // Opzioni di default
+      const itemOptions = {
+        ttl: options.ttl || 0,
+        priority: options.priority || 1,
+        tags: options.tags || [],
+        metadata: options.metadata || {},
+        dependencies: options.dependencies || [],
+        ...options
+      };
+      
+      // Imposta l'elemento in tutti i livelli
+      const results = [];
+      
+      for (const level of this.levels) {
+        const result = await level.set(formattedKey, value, itemOptions);
+        results.push(result);
+      }
+      
+      // Verifica se l'operazione è riuscita in almeno un livello
+      const success = results.some(r => r);
+      
+      const endTime = performance.now();
+      this.metrics.recordLatency('set', endTime - startTime);
+      
+      if (success) {
+        this.metrics.incrementCounter('sets');
+      } else {
+        this.metrics.incrementCounter('set_failures');
+      }
+      
+      return success;
+    } catch (error) {
+      console.error(`Errore durante l'impostazione dell'elemento per la chiave ${key}:`, error);
+      
+      const endTime = performance.now();
+      this.metrics.recordLatency('set_failed', endTime - startTime);
+      this.metrics.incrementCounter('set_failures');
+      
+      // Emetti evento di errore
+      this.emit('error', {
+        operation: 'set',
+        key,
+        error
+      });
+      
+      return false;
+    }
+  }
+  
+  /**
+   * Ottiene un elemento dalla cache
+   * @param {string} key - Chiave dell'elemento
+   * @returns {Promise<*>} - Valore dell'elemento o null se non trovato
+   */
+  async get(key) {
+    const startTime = performance.now();
+    
+    try {
+      // Formatta la chiave
+      const formattedKey = this._formatKey(key);
+      
+      // Cerca l'elemento in tutti i livelli
+      for (let i = 0; i < this.levels.length; i++) {
+        const level = this.levels[i];
+        const value = await level.get(formattedKey);
         
-        // Aggiorna le metriche di latenza
-        this.metrics.latency.l1 = endTime - startTime;
-        
-        if (value !== undefined) {
-          // Aggiorna le metriche
-          this.metrics.hits.l1++;
+        if (value !== null) {
+          // Elemento trovato
           
-          // Aggiorna le statistiche di prefetching
-          if (this.prefetchStats.has(normalizedKey)) {
-            const stats = this.prefetchStats.get(normalizedKey);
-            stats.hits++;
-            this.metrics.prefetching.hits++;
+          // Registra l'accesso per il prefetching
+          if (this.prefetchManager) {
+            this.prefetchManager.recordAccess(formattedKey);
           }
+          
+          // Propaga l'elemento ai livelli superiori
+          this._propagateToHigherLevels(formattedKey, value, i);
+          
+          const endTime = performance.now();
+          this.metrics.recordLatency('get_hit', endTime - startTime);
+          this.metrics.incrementCounter('hits');
           
           return value;
         }
       }
       
-      // Cerca nella cache L2 (Redis)
-      if (this.config.l2.enabled && this.l2Cache) {
-        const startTime = Date.now();
-        let value;
-        
-        try {
-          value = await this.l2Cache.get(normalizedKey);
-        } catch (error) {
-          console.error(`Errore durante il recupero dalla cache L2 per la chiave ${normalizedKey}:`, error);
-          this.metrics.errors.l2++;
-        }
-        
-        const endTime = Date.now();
-        
-        // Aggiorna le metriche di latenza
-        this.metrics.latency.l2 = endTime - startTime;
-        
-        if (value !== null && value !== undefined) {
-          // Aggiorna le metriche
-          this.metrics.hits.l2++;
-          
-          // Decodifica il valore se necessario
-          let decodedValue = value;
-          
-          try {
-            // Se il valore è una stringa JSON, prova a decodificarlo
-            if (typeof value === 'string' && (value.startsWith('{') || value.startsWith('['))) {
-              decodedValue = JSON.parse(value);
-            }
-          } catch (error) {
-            // Se non è JSON valido, usa il valore originale
-            decodedValue = value;
-          }
-          
-          // Promuovi il valore alla cache L1
-          if (this.config.l1.enabled && this.l1Cache) {
-            this.l1Cache.set(normalizedKey, decodedValue, { ttl: this.config.l1.ttl * 1000 });
-          }
-          
-          // Aggiorna le statistiche di prefetching
-          if (this.prefetchStats.has(normalizedKey)) {
-            const stats = this.prefetchStats.get(normalizedKey);
-            stats.hits++;
-            this.metrics.prefetching.hits++;
-          }
-          
-          return decodedValue;
-        }
-      }
-      
-      // Cerca nella cache L3 (cache distribuita)
-      if (this.config.l3.enabled && this.l3Cache) {
-        const startTime = Date.now();
-        let value;
-        
-        try {
-          if (this.l3Cache.getAsync) {
-            // Memcached
-            value = await this.l3Cache.getAsync(normalizedKey);
-          } else {
-            // Redis Cluster o custom
-            value = await this.l3Cache.get(normalizedKey);
-          }
-        } catch (error) {
-          console.error(`Errore durante il recupero dalla cache L3 per la chiave ${normalizedKey}:`, error);
-          this.metrics.errors.l3++;
-        }
-        
-        const endTime = Date.now();
-        
-        // Aggiorna le metriche di latenza
-        this.metrics.latency.l3 = endTime - startTime;
-        
-        if (value !== null && value !== undefined) {
-          // Aggiorna le metriche
-          this.metrics.hits.l3++;
-          
-          // Decodifica il valore se necessario
-          let decodedValue = value;
-          
-          try {
-            // Se il valore è una stringa JSON, prova a decodificarlo
-            if (typeof value === 'string' && (value.startsWith('{') || value.startsWith('['))) {
-              decodedValue = JSON.parse(value);
-            }
-          } catch (error) {
-            // Se non è JSON valido, usa il valore originale
-            decodedValue = value;
-          }
-          
-          // Promuovi il valore alla cache L2
-          if (this.config.l2.enabled && this.l2Cache) {
-            try {
-              const valueToStore = typeof decodedValue === 'object' ? JSON.stringify(decodedValue) : decodedValue;
-              await this.l2Cache.set(normalizedKey, valueToStore, 'EX', this.config.l2.ttl);
-            } catch (error) {
-              console.error(`Errore durante la promozione alla cache L2 per la chiave ${normalizedKey}:`, error);
-              this.metrics.errors.l2++;
-            }
-          }
-          
-          // Promuovi il valore alla cache L1
-          if (this.config.l1.enabled && this.l1Cache) {
-            this.l1Cache.set(normalizedKey, decodedValue, { ttl: this.config.l1.ttl * 1000 });
-          }
-          
-          // Aggiorna le statistiche di prefetching
-          if (this.prefetchStats.has(normalizedKey)) {
-            const stats = this.prefetchStats.get(normalizedKey);
-            stats.hits++;
-            this.metrics.prefetching.hits++;
-          }
-          
-          return decodedValue;
-        }
-      }
-      
-      // Valore non trovato in nessuna cache
-      this.metrics.misses++;
-      
-      // Aggiorna le statistiche di prefetching
-      if (this.prefetchStats.has(normalizedKey)) {
-        const stats = this.prefetchStats.get(normalizedKey);
-        stats.misses++;
-        this.metrics.prefetching.misses++;
-      }
+      // Elemento non trovato
+      const endTime = performance.now();
+      this.metrics.recordLatency('get_miss', endTime - startTime);
+      this.metrics.incrementCounter('misses');
       
       return null;
     } catch (error) {
-      console.error(`Errore durante il recupero dalla cache per la chiave ${normalizedKey}:`, error);
-      throw error;
+      console.error(`Errore durante l'ottenimento dell'elemento per la chiave ${key}:`, error);
+      
+      const endTime = performance.now();
+      this.metrics.recordLatency('get_failed', endTime - startTime);
+      this.metrics.incrementCounter('get_failures');
+      
+      // Emetti evento di errore
+      this.emit('error', {
+        operation: 'get',
+        key,
+        error
+      });
+      
+      return null;
     }
   }
   
   /**
-   * Imposta un valore nella cache
-   * @param {string} key - Chiave
-   * @param {*} value - Valore da memorizzare
-   * @param {Object} options - Opzioni
-   * @param {number} options.ttl - TTL in secondi (sovrascrive il valore predefinito)
-   * @param {Array<string>} options.dependencies - Chiavi da cui dipende questo valore
-   * @returns {Promise<boolean>} True se l'operazione ha avuto successo
+   * Propaga un elemento ai livelli superiori
+   * @param {string} key - Chiave dell'elemento
+   * @param {*} value - Valore dell'elemento
+   * @param {number} foundLevel - Livello in cui è stato trovato l'elemento
+   * @private
    */
-  async set(key, value, options = {}) {
-    // Verifica che il sistema sia inizializzato
-    if (!this.isInitialized) {
-      throw new Error('Sistema di cache non inizializzato');
-    }
-    
-    // Normalizza la chiave
-    const normalizedKey = this._normalizeKey(key);
-    
-    // Aggiorna le metriche
-    this.metrics.operations.set++;
-    
+  async _propagateToHigherLevels(key, value, foundLevel) {
     try {
-      // Calcola il TTL
-      const ttl = options.ttl !== undefined ? options.ttl : this.config.defaultTTL;
-      
-      // Registra le dipendenze se specificate
-      if (options.dependencies && this.config.dependencies.enabled) {
-        await this.registerDependency(normalizedKey, options.dependencies);
+      // Propaga l'elemento ai livelli superiori
+      for (let i = foundLevel - 1; i >= 0; i--) {
+        const level = this.levels[i];
+        await level.set(key, value);
       }
-      
-      // Comprimi il valore se necessario
-      let valueToStore = value;
-      let compressedData = null;
-      
-      if (this.config.enableCompression && typeof value === 'object') {
-        compressedData = await this._compressValue(value, normalizedKey);
-        
-        if (compressedData.compressed) {
-          valueToStore = compressedData.value;
-        }
-      }
-      
-      // Memorizza il valore nella cache L1
-      if (this.config.l1.enabled && this.l1Cache) {
-        this.l1Cache.set(normalizedKey, value, { ttl: this.config.l1.ttl * 1000 });
-      }
-      
-      // Memorizza il valore nella cache L2
-      if (this.config.l2.enabled && this.l2Cache) {
-        try {
-          // Prepara il valore da memorizzare
-          let l2Value;
-          
-          if (compressedData && compressedData.compressed) {
-            // Usa il valore compresso
-            l2Value = compressedData.value;
-          } else {
-            // Converti in JSON se è un oggetto
-            l2Value = typeof value === 'object' ? JSON.stringify(value) : value;
-          }
-          
-          // Memorizza il valore
-          await this.l2Cache.set(normalizedKey, l2Value, 'EX', this.config.l2.ttl);
-        } catch (error) {
-          console.error(`Errore durante la memorizzazione nella cache L2 per la chiave ${normalizedKey}:`, error);
-          this.metrics.errors.l2++;
-        }
-      }
-      
-      // Memorizza il valore nella cache L3
-      if (this.config.l3.enabled && this.l3Cache) {
-        try {
-          // Prepara il valore da memorizzare
-          let l3Value;
-          
-          if (compressedData && compressedData.compressed) {
-            // Usa il valore compresso
-            l3Value = compressedData.value;
-          } else {
-            // Converti in JSON se è un oggetto
-            l3Value = typeof value === 'object' ? JSON.stringify(value) : value;
-          }
-          
-          // Memorizza il valore
-          if (this.l3Cache.setAsync) {
-            // Memcached
-            await this.l3Cache.setAsync(normalizedKey, l3Value, this.config.l3.ttl);
-          } else {
-            // Redis Cluster o custom
-            await this.l3Cache.set(normalizedKey, l3Value, 'EX', this.config.l3.ttl);
-          }
-        } catch (error) {
-          console.error(`Errore durante la memorizzazione nella cache L3 per la chiave ${normalizedKey}:`, error);
-          this.metrics.errors.l3++;
-        }
-      }
-      
-      return true;
     } catch (error) {
-      console.error(`Errore durante la memorizzazione nella cache per la chiave ${normalizedKey}:`, error);
-      throw error;
+      console.error(`Errore durante la propagazione dell'elemento per la chiave ${key}:`, error);
     }
   }
   
   /**
-   * Invalida una chiave dalla cache
-   * @param {string} key - Chiave da invalidare
-   * @param {Object} options - Opzioni
-   * @param {boolean} options.invalidateDependents - Se true, invalida anche le chiavi dipendenti
-   * @returns {Promise<boolean>} True se l'operazione ha avuto successo
+   * Verifica se un elemento esiste nella cache
+   * @param {string} key - Chiave dell'elemento
+   * @returns {boolean} - True se l'elemento esiste
    */
-  async invalidate(key, options = {}) {
-    // Verifica che il sistema sia inizializzato
-    if (!this.isInitialized) {
-      throw new Error('Sistema di cache non inizializzato');
-    }
-    
-    // Normalizza la chiave
-    const normalizedKey = this._normalizeKey(key);
-    
-    // Aggiorna le metriche
-    this.metrics.operations.invalidate++;
-    
+  has(key) {
     try {
-      // Invalida la chiave nella cache L1
-      if (this.config.l1.enabled && this.l1Cache) {
-        this.l1Cache.delete(normalizedKey);
-      }
+      // Formatta la chiave
+      const formattedKey = this._formatKey(key);
       
-      // Invalida la chiave nella cache L2
-      if (this.config.l2.enabled && this.l2Cache) {
-        try {
-          await this.l2Cache.del(normalizedKey);
-        } catch (error) {
-          console.error(`Errore durante l'invalidazione nella cache L2 per la chiave ${normalizedKey}:`, error);
-          this.metrics.errors.l2++;
+      // Verifica se l'elemento esiste in almeno un livello
+      for (const level of this.levels) {
+        if (level.has(formattedKey)) {
+          return true;
         }
       }
       
-      // Invalida la chiave nella cache L3
-      if (this.config.l3.enabled && this.l3Cache) {
-        try {
-          if (this.l3Cache.delAsync) {
-            // Memcached
-            await this.l3Cache.delAsync(normalizedKey);
-          } else {
-            // Redis Cluster o custom
-            await this.l3Cache.del(normalizedKey);
-          }
-        } catch (error) {
-          console.error(`Errore durante l'invalidazione nella cache L3 per la chiave ${normalizedKey}:`, error);
-          this.metrics.errors.l3++;
-        }
-      }
-      
-      // Invalida le chiavi dipendenti se richiesto
-      if (options.invalidateDependents !== false && this.config.dependencies.enabled) {
-        await this._invalidateDependents(normalizedKey);
-      }
-      
-      return true;
+      return false;
     } catch (error) {
-      console.error(`Errore durante l'invalidazione nella cache per la chiave ${normalizedKey}:`, error);
-      throw error;
+      console.error(`Errore durante la verifica dell'esistenza dell'elemento per la chiave ${key}:`, error);
+      
+      // Emetti evento di errore
+      this.emit('error', {
+        operation: 'has',
+        key,
+        error
+      });
+      
+      return false;
     }
   }
   
   /**
-   * Invalida tutte le chiavi con un prefisso specifico
-   * @param {string} prefix - Prefisso delle chiavi da invalidare
-   * @param {Object} options - Opzioni
-   * @param {boolean} options.invalidateDependents - Se true, invalida anche le chiavi dipendenti
-   * @returns {Promise<boolean>} True se l'operazione ha avuto successo
+   * Elimina un elemento dalla cache
+   * @param {string} key - Chiave dell'elemento
+   * @returns {Promise<boolean>} - True se l'elemento è stato eliminato
    */
-  async invalidateByPrefix(prefix, options = {}) {
-    // Verifica che il sistema sia inizializzato
-    if (!this.isInitialized) {
-      throw new Error('Sistema di cache non inizializzato');
-    }
-    
-    // Normalizza il prefisso
-    const normalizedPrefix = this._normalizeKey(prefix);
+  async delete(key) {
+    const startTime = performance.now();
     
     try {
-      // Invalida le chiavi nella cache L1
-      if (this.config.l1.enabled && this.l1Cache) {
-        for (const key of this.l1Cache.keys()) {
-          if (key.startsWith(normalizedPrefix)) {
-            this.l1Cache.delete(key);
-          }
-        }
+      // Formatta la chiave
+      const formattedKey = this._formatKey(key);
+      
+      // Elimina l'elemento da tutti i livelli
+      const results = [];
+      
+      for (const level of this.levels) {
+        const result = await level.delete(formattedKey);
+        results.push(result);
       }
       
-      // Invalida le chiavi nella cache L2
-      if (this.config.l2.enabled && this.l2Cache) {
-        try {
-          // Ottieni tutte le chiavi con il prefisso
-          const keys = await this.l2Cache.keys(`${normalizedPrefix}*`);
-          
-          if (keys.length > 0) {
-            // Elimina tutte le chiavi
-            await this.l2Cache.del(...keys);
-          }
-        } catch (error) {
-          console.error(`Errore durante l'invalidazione per prefisso nella cache L2 (${normalizedPrefix}):`, error);
-          this.metrics.errors.l2++;
-        }
+      // Verifica se l'operazione è riuscita in almeno un livello
+      const success = results.some(r => r);
+      
+      const endTime = performance.now();
+      this.metrics.recordLatency('delete', endTime - startTime);
+      
+      if (success) {
+        this.metrics.incrementCounter('deletes');
       }
       
-      // Invalida le chiavi nella cache L3
-      if (this.config.l3.enabled && this.l3Cache) {
-        try {
-          if (this.l3Cache.keys) {
-            // Redis Cluster
-            const keys = await this.l3Cache.keys(`${normalizedPrefix}*`);
-            
-            if (keys.length > 0) {
-              // Elimina tutte le chiavi
-              await this.l3Cache.del(...keys);
-            }
-          } else {
-            // Memcached o custom (non supporta l'eliminazione per prefisso)
-            console.warn('L\'invalidazione per prefisso non è supportata per la cache L3');
-          }
-        } catch (error) {
-          console.error(`Errore durante l'invalidazione per prefisso nella cache L3 (${normalizedPrefix}):`, error);
-          this.metrics.errors.l3++;
-        }
-      }
-      
-      // Invalida le chiavi dipendenti se richiesto
-      if (options.invalidateDependents !== false && this.config.dependencies.enabled) {
-        // Trova tutte le chiavi che iniziano con il prefisso
-        const keysToInvalidate = [];
-        
-        for (const key of this.dependencyGraph.keys()) {
-          if (key.startsWith(normalizedPrefix)) {
-            keysToInvalidate.push(key);
-          }
-        }
-        
-        // Invalida tutte le chiavi dipendenti
-        for (const key of keysToInvalidate) {
-          await this._invalidateDependents(key);
-        }
-      }
-      
-      return true;
+      return success;
     } catch (error) {
-      console.error(`Errore durante l'invalidazione per prefisso (${normalizedPrefix}):`, error);
-      throw error;
+      console.error(`Errore durante l'eliminazione dell'elemento per la chiave ${key}:`, error);
+      
+      const endTime = performance.now();
+      this.metrics.recordLatency('delete_failed', endTime - startTime);
+      this.metrics.incrementCounter('delete_failures');
+      
+      // Emetti evento di errore
+      this.emit('error', {
+        operation: 'delete',
+        key,
+        error
+      });
+      
+      return false;
+    }
+  }
+  
+  /**
+   * Elimina tutti gli elementi dalla cache
+   * @returns {Promise<boolean>} - True se l'operazione è riuscita
+   */
+  async clear() {
+    const startTime = performance.now();
+    
+    try {
+      // Elimina tutti gli elementi da tutti i livelli
+      const results = [];
+      
+      for (const level of this.levels) {
+        const result = await level.clear();
+        results.push(result);
+      }
+      
+      // Verifica se l'operazione è riuscita in tutti i livelli
+      const success = results.every(r => r);
+      
+      const endTime = performance.now();
+      this.metrics.recordLatency('clear', endTime - startTime);
+      this.metrics.incrementCounter('clears');
+      
+      return success;
+    } catch (error) {
+      console.error('Errore durante la pulizia della cache:', error);
+      
+      const endTime = performance.now();
+      this.metrics.recordLatency('clear_failed', endTime - startTime);
+      this.metrics.incrementCounter('clear_failures');
+      
+      // Emetti evento di errore
+      this.emit('error', {
+        operation: 'clear',
+        error
+      });
+      
+      return false;
+    }
+  }
+  
+  /**
+   * Invalida gli elementi con un tag specifico
+   * @param {string} tag - Tag
+   * @returns {Promise<number>} - Numero di elementi invalidati
+   */
+  async invalidateByTag(tag) {
+    const startTime = performance.now();
+    
+    try {
+      // Invalida gli elementi in tutti i livelli
+      let totalCount = 0;
+      
+      for (const level of this.levels) {
+        const count = await level.invalidateByTag(tag);
+        totalCount += count;
+      }
+      
+      const endTime = performance.now();
+      this.metrics.recordLatency('invalidate_by_tag', endTime - startTime);
+      this.metrics.incrementCounter('invalidations', totalCount);
+      
+      return totalCount;
+    } catch (error) {
+      console.error(`Errore durante l'invalidazione degli elementi con il tag ${tag}:`, error);
+      
+      const endTime = performance.now();
+      this.metrics.recordLatency('invalidate_by_tag_failed', endTime - startTime);
+      this.metrics.incrementCounter('invalidation_failures');
+      
+      // Emetti evento di errore
+      this.emit('error', {
+        operation: 'invalidateByTag',
+        tag,
+        error
+      });
+      
+      return 0;
+    }
+  }
+  
+  /**
+   * Invalida gli elementi con un pattern di chiave
+   * @param {string|RegExp} pattern - Pattern
+   * @returns {Promise<number>} - Numero di elementi invalidati
+   */
+  async invalidateByPattern(pattern) {
+    const startTime = performance.now();
+    
+    try {
+      // Invalida gli elementi in tutti i livelli
+      let totalCount = 0;
+      
+      for (const level of this.levels) {
+        const count = await level.invalidateByPattern(pattern);
+        totalCount += count;
+      }
+      
+      const endTime = performance.now();
+      this.metrics.recordLatency('invalidate_by_pattern', endTime - startTime);
+      this.metrics.incrementCounter('invalidations', totalCount);
+      
+      return totalCount;
+    } catch (error) {
+      console.error(`Errore durante l'invalidazione degli elementi con il pattern ${pattern}:`, error);
+      
+      const endTime = performance.now();
+      this.metrics.recordLatency('invalidate_by_pattern_failed', endTime - startTime);
+      this.metrics.incrementCounter('invalidation_failures');
+      
+      // Emetti evento di errore
+      this.emit('error', {
+        operation: 'invalidateByPattern',
+        pattern: pattern.toString(),
+        error
+      });
+      
+      return 0;
+    }
+  }
+  
+  /**
+   * Invalida tutti gli elementi
+   * @returns {Promise<boolean>} - True se l'operazione è riuscita
+   */
+  async invalidateAll() {
+    return this.clear();
+  }
+  
+  /**
+   * Esegue la pulizia della cache
+   * @returns {Promise<number>} - Numero di elementi rimossi
+   */
+  async cleanup() {
+    const startTime = performance.now();
+    
+    try {
+      // Esegui la pulizia in tutti i livelli
+      let totalCount = 0;
+      
+      for (const level of this.levels) {
+        const count = await level.cleanup();
+        totalCount += count;
+      }
+      
+      const endTime = performance.now();
+      this.metrics.recordLatency('cleanup', endTime - startTime);
+      this.metrics.incrementCounter('cleanups');
+      
+      return totalCount;
+    } catch (error) {
+      console.error('Errore durante la pulizia della cache:', error);
+      
+      const endTime = performance.now();
+      this.metrics.recordLatency('cleanup_failed', endTime - startTime);
+      this.metrics.incrementCounter('cleanup_failures');
+      
+      // Emetti evento di errore
+      this.emit('error', {
+        operation: 'cleanup',
+        error
+      });
+      
+      return 0;
     }
   }
   
   /**
    * Ottiene le statistiche della cache
-   * @returns {Promise<Object>} Statistiche della cache
+   * @returns {Object} - Statistiche
    */
-  async getStats() {
-    // Verifica che il sistema sia inizializzato
-    if (!this.isInitialized) {
-      throw new Error('Sistema di cache non inizializzato');
+  getStats() {
+    // Statistiche generali
+    const stats = {
+      levels: this.levels.length,
+      levelStats: {},
+      hits: 0,
+      misses: 0,
+      hitRatio: 0,
+      size: 0,
+      capacity: 0,
+      usage: 0,
+      items: 0,
+      ...this.metrics.getMetrics()
+    };
+    
+    // Statistiche dei livelli
+    for (const level of this.levels) {
+      const levelStats = level.getStats();
+      stats.levelStats[level.name] = levelStats;
+      
+      // Aggiorna le statistiche generali
+      stats.hits += levelStats.hits;
+      stats.misses += levelStats.misses;
+      stats.size += levelStats.size;
+      stats.capacity += levelStats.capacity;
+      stats.items += levelStats.items;
     }
     
-    try {
-      // Statistiche L1
-      let l1Stats = { size: 0, maxSize: 0 };
-      if (this.config.l1.enabled && this.l1Cache) {
-        l1Stats = {
-          size: this.l1Cache.size,
-          maxSize: this.config.l1.maxSize,
-          utilization: this.l1Cache.size / this.config.l1.maxSize
-        };
-      }
-      
-      // Statistiche L2
-      let l2Stats = { size: 0 };
-      if (this.config.l2.enabled && this.l2Cache) {
-        try {
-          const info = await this.l2Cache.info();
-          l2Stats = {
-            size: info.used_memory ? parseInt(info.used_memory) : 0,
-            keys: info.db0 ? parseInt(info.db0.split('=')[1].split(',')[0]) : 0
-          };
-        } catch (error) {
-          console.error('Errore durante il recupero delle statistiche L2:', error);
-        }
-      }
-      
-      // Statistiche L3
-      let l3Stats = { size: 0 };
-      if (this.config.l3.enabled && this.l3Cache) {
-        try {
-          if (this.l3Cache.stats) {
-            const stats = await promisify(this.l3Cache.stats).bind(this.l3Cache)();
-            l3Stats = { size: stats.curr_items || 0 };
-          }
-        } catch (error) {
-          console.error('Errore durante il recupero delle statistiche L3:', error);
-        }
-      }
-      
-      // Statistiche di prefetching
-      const prefetchingStats = {
-        enabled: this.config.prefetching.enabled,
-        patternCount: this.accessPatterns.size,
-        successRate: this.metrics.prefetching.totalItems > 0
-          ? (this.metrics.prefetching.hits / this.metrics.prefetching.totalItems) * 100
-          : 0
-      };
-      
-      // Statistiche delle dipendenze
-      const dependenciesStats = {
-        enabled: this.config.dependencies.enabled,
-        count: this.dependencyGraph.size,
-        totalDependencies: Array.from(this.dependencyGraph.values())
-          .reduce((sum, deps) => sum + deps.size, 0)
-      };
-      
-      return {
-        levels: {
-          l1: l1Stats,
-          l2: l2Stats,
-          l3: l3Stats
-        },
-        prefetching: prefetchingStats,
-        dependencies: dependenciesStats,
-        metrics: { ...this.metrics }
-      };
-    } catch (error) {
-      console.error('Errore durante il recupero delle statistiche della cache:', error);
-      throw error;
+    // Calcola il rapporto di hit
+    stats.hitRatio = stats.hits / (stats.hits + stats.misses || 1);
+    
+    // Calcola l'utilizzo
+    stats.usage = stats.size / (stats.capacity || 1);
+    
+    // Statistiche del prefetching
+    if (this.prefetchManager) {
+      stats.prefetching = this.prefetchManager.getStats();
     }
+    
+    return stats;
   }
   
   /**
-   * Chiude il sistema di cache
-   * @returns {Promise<void>}
+   * Chiude la cache
    */
   async close() {
-    // Verifica che il sistema sia inizializzato
-    if (!this.isInitialized) {
-      return;
-    }
-    
-    console.log('Chiusura del sistema di cache multi-livello...');
-    
-    // Imposta il flag di chiusura
-    this.isShuttingDown = true;
-    
     try {
-      // Persisti la cache se abilitato
-      if (this.config.persistence.enabled) {
-        // Cancella il timer di persistenza
-        if (this.persistenceTimer) {
-          clearInterval(this.persistenceTimer);
-          this.persistenceTimer = null;
-        }
-        
-        // Esegui un'ultima persistenza
-        await this._persistCache();
+      // Chiudi il prefetch manager
+      if (this.prefetchManager) {
+        await this.prefetchManager.close();
+        this.prefetchManager = null;
       }
       
-      // Chiudi il pool di worker per il prefetching
-      if (this.prefetchWorkerPool) {
-        await this.prefetchWorkerPool.close();
-        this.prefetchWorkerPool = null;
+      // Chiudi tutti i livelli
+      for (const level of this.levels) {
+        level.close();
       }
       
-      // Chiudi la cache L2
-      if (this.l2Cache) {
-        if (this.l2Cache.quit) {
-          await this.l2Cache.quit();
-        } else if (this.l2Cache.disconnect) {
-          await this.l2Cache.disconnect();
-        }
-        this.l2Cache = null;
-      }
+      // Svuota l'array dei livelli
+      this.levels = [];
       
-      // Chiudi la cache L3
-      if (this.l3Cache) {
-        if (this.l3Cache.quit) {
-          await this.l3Cache.quit();
-        } else if (this.l3Cache.end) {
-          this.l3Cache.end();
-        } else if (this.l3Cache.disconnect) {
-          await this.l3Cache.disconnect();
-        }
-        this.l3Cache = null;
-      }
+      // Rimuovi tutti i listener
+      this.removeAllListeners();
       
-      // Resetta lo stato
-      this.l1Cache = null;
-      this.isInitialized = false;
-      
-      console.log('Sistema di cache multi-livello chiuso');
+      console.log('MultiLevelCache chiusa');
     } catch (error) {
-      console.error('Errore durante la chiusura del sistema di cache:', error);
+      console.error('Errore durante la chiusura della cache multi-livello:', error);
       throw error;
     }
   }
 }
 
-module.exports = { MultiLevelCache };
+/**
+ * Crea un worker per il prefetching
+ */
+function createPrefetchWorker() {
+  // Verifica che sia un worker thread
+  if (isMainThread) {
+    throw new Error('Questa funzione deve essere chiamata da un worker thread');
+  }
+  
+  // Gestisci i messaggi
+  parentPort.on('message', async (message) => {
+    try {
+      const { type, ...params } = message;
+      
+      switch (type) {
+        case 'prefetch':
+          const { key, fetcher } = params;
+          
+          // Verifica che il fetcher sia valido
+          if (typeof fetcher !== 'function') {
+            parentPort.postMessage({ success: false, error: 'Fetcher non valido' });
+            return;
+          }
+          
+          // Esegui il prefetch
+          const value = await fetcher(key);
+          
+          // Verifica se il prefetch è riuscito
+          if (value !== null && value !== undefined) {
+            // Stima la dimensione
+            let size = 0;
+            if (Buffer.isBuffer(value)) {
+              size = value.length;
+            } else if (typeof value === 'string') {
+              size = Buffer.byteLength(value, 'utf8');
+            } else {
+              try {
+                size = Buffer.byteLength(JSON.stringify(value), 'utf8');
+              } catch (e) {
+                size = 1024; // Valore di default
+              }
+            }
+            
+            parentPort.postMessage({ success: true, value, size });
+          } else {
+            parentPort.postMessage({ success: false, value: null });
+          }
+          break;
+          
+        default:
+          parentPort.postMessage({ success: false, error: `Tipo di operazione non supportato: ${type}` });
+      }
+    } catch (error) {
+      parentPort.postMessage({ success: false, error: error.message });
+    }
+  });
+}
+
+module.exports = {
+  MultiLevelCache,
+  CacheLevel,
+  CacheItem,
+  PrefetchManager,
+  createPrefetchWorker
+};
