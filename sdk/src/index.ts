@@ -1,63 +1,51 @@
-/**
- * @fileoverview Entry point dell'SDK Layer 2 di Solana
- */
-
-import { Layer2Client, Layer2ClientConfig } from './client';
-import { Bridge } from './bridge';
+import { L2Client } from './client';
+import { AccountManager } from './account';
 import { TransactionManager } from './transaction';
-import { Challenge } from './challenge';
-import { BatchManager } from './batch';
-import { ProofManager } from './proof';
-import { StateManager } from './state';
+import { BridgeManager } from './bridge';
+import { WalletAdapterFactory } from './wallet';
+import { WalletAdapter } from './wallet/adapter';
+import { PhantomWalletAdapter } from './wallet/phantom';
+import { BackpackWalletAdapter } from './wallet/backpack';
+import { MetaMaskWalletAdapter } from './wallet/metamask';
 
-// Esporta tutte le classi e le interfacce principali
+// Esporta tutte le classi e interfacce principali
 export {
-  // Client principale
-  Layer2Client,
-  Layer2ClientConfig,
-  
-  // Moduli
-  Bridge,
+  L2Client,
+  AccountManager,
   TransactionManager,
-  Challenge,
-  BatchManager,
-  ProofManager,
-  StateManager,
-  
-  // Tipi da batch.ts
-  BatchConfig,
-  BatchStatus,
-  BatchInfo,
-  
-  // Tipi da proof.ts
-  ProofType,
-  Proof,
-  VerifyProofOptions,
-  VerifyProofResult,
-  
-  // Tipi da state.ts
-  Layer2AccountType,
-  Layer2AccountInfo,
-  Layer2StateInfo,
-  StateMonitorOptions,
+  BridgeManager,
+  WalletAdapterFactory,
+  WalletAdapter,
+  PhantomWalletAdapter,
+  BackpackWalletAdapter,
+  MetaMaskWalletAdapter
 };
 
-// Esporta anche i tipi di errore
-export * from './types/errors';
+// Esporta tutti i tipi
+export * from './types';
 
-// Funzione di utilità per creare un client Layer 2
-export function createLayer2Client(config: Layer2ClientConfig): Layer2Client {
-  return new Layer2Client(config);
+// Funzione di utilità per creare un client L2
+export function createL2Client(endpoint: string, options?: any): L2Client {
+  return new L2Client({
+    endpoint,
+    ...options
+  });
 }
 
-// Versione dell'SDK
-export const SDK_VERSION = '0.2.0';
+// Funzione di utilità per creare un client L2 connesso al devnet
+export function createDevnetClient(options?: any): L2Client {
+  return L2Client.devnet();
+}
 
-// Informazioni sull'SDK
-export const SDK_INFO = {
-  name: 'layer2-solana-sdk',
-  version: SDK_VERSION,
-  description: 'JavaScript SDK per interagire con il Layer 2 di Solana',
-  isNodeCompatible: true,
-  isBrowserCompatible: true,
-};
+// Funzione di utilità per creare un client L2 connesso al testnet
+export function createTestnetClient(options?: any): L2Client {
+  return L2Client.testnet();
+}
+
+// Funzione di utilità per creare un client L2 connesso al mainnet
+export function createMainnetClient(options?: any): L2Client {
+  return L2Client.mainnet();
+}
+
+// Versione del SDK
+export const VERSION = '1.0.0';

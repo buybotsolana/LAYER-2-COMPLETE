@@ -1,0 +1,144 @@
+.wallet-connect {
+  max-width: 600px;
+  margin: 2rem auto;
+  padding: 2rem;
+  background-color: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.wallet-connect h2 {
+  margin-top: 0;
+  color: #1a1a2e;
+  font-size: 1.8rem;
+  text-align: center;
+}
+
+.wallet-connect p {
+  color: #666;
+  text-align: center;
+  margin-bottom: 2rem;
+}
+
+.wallet-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+
+.wallet-option {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 1.5rem;
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.wallet-option:hover {
+  border-color: #7b68ee;
+  transform: translateY(-2px);
+}
+
+.wallet-option.selected {
+  border-color: #7b68ee;
+  background-color: rgba(123, 104, 238, 0.05);
+}
+
+.wallet-option img {
+  width: 48px;
+  height: 48px;
+  margin-bottom: 1rem;
+}
+
+.wallet-option span {
+  font-weight: 500;
+  color: #333;
+}
+
+.wallet-option .not-installed {
+  font-size: 0.8rem;
+  color: #ff6b6b;
+  margin-top: 0.5rem;
+}
+
+.connect-button {
+  display: block;
+  width: 100%;
+  padding: 1rem;
+  background-color: #7b68ee;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.3s ease;
+}
+
+.connect-button:hover:not(:disabled) {
+  background-color: #6a5acd;
+}
+
+.connect-button:disabled {
+  background-color: #d1d1d1;
+  cursor: not-allowed;
+}
+
+.error-message {
+  margin-top: 1rem;
+  padding: 0.75rem;
+  background-color: #ffebee;
+  color: #d32f2f;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+.wallet-instructions {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid #e0e0e0;
+}
+
+.wallet-instructions h3 {
+  font-size: 1.2rem;
+  color: #333;
+  margin-bottom: 0.5rem;
+}
+
+.wallet-instructions p {
+  text-align: left;
+  margin-bottom: 0.5rem;
+}
+
+.wallet-instructions ul {
+  padding-left: 1.5rem;
+}
+
+.wallet-instructions li {
+  margin-bottom: 0.5rem;
+}
+
+.wallet-instructions a {
+  color: #7b68ee;
+  text-decoration: none;
+}
+
+.wallet-instructions a:hover {
+  text-decoration: underline;
+}
+
+@media (max-width: 768px) {
+  .wallet-connect {
+    padding: 1.5rem;
+    margin: 1rem;
+  }
+  
+  .wallet-list {
+    grid-template-columns: 1fr;
+  }
+}
