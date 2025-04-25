@@ -1,129 +1,146 @@
-# Layer-2 su Solana - Guida al Repository
+# Layer-2 su Solana
 
-Questo repository contiene l'implementazione completa del sistema Layer-2 su Solana, una soluzione di scalabilità che consente transazioni ad alta velocità e basso costo sulla blockchain Solana.
+Un Optimistic Rollup che utilizza la Solana Virtual Machine (SVM) come layer di esecuzione su Ethereum.
 
-## Struttura del Repository
+[![Build Status](https://img.shields.io/github/workflow/status/buybotsolana/LAYER-2-COMPLETE/CI)](https://github.com/buybotsolana/LAYER-2-COMPLETE/actions)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Documentation](https://img.shields.io/badge/docs-latest-brightgreen.svg)](docs/)
 
-Il repository è organizzato nelle seguenti directory principali:
+## Panoramica del Progetto
 
-- **onchain/**: Componenti onchain (Rust) che vengono eseguiti sulla blockchain Solana
-- **offchain/**: Componenti offchain (JavaScript) che gestiscono l'ordinamento e l'elaborazione delle transazioni
-- **bridge/**: Smart contract Ethereum (Solidity) per il bridge tra Ethereum e Solana
-- **sdk/**: SDK client (TypeScript) per interagire con il Layer-2
-- **tests/**: Test unitari, di integrazione e di sicurezza
-- **docs/**: Documentazione completa del sistema
+Layer-2 su Solana è una soluzione di scaling per Ethereum che utilizza la Solana Virtual Machine (SVM) come layer di esecuzione. Implementa un rollup ottimistico che eredita la sicurezza di Ethereum mentre sfrutta la velocità e l'efficienza della SVM.
 
-## Componenti Principali
+### Caratteristiche Principali
 
-### Componenti Onchain
+- **Alta Velocità**: Throughput di oltre 1,000 TPS, con obiettivo futuro di 10,000 TPS
+- **Basse Commissioni**: Costi di transazione ridotti rispetto a Ethereum L1
+- **Sicurezza Garantita da Ethereum**: Tutti gli stati sono ancorati su Ethereum
+- **Compatibilità con Solana**: Supporto per programmi Solana esistenti
+- **Bridge Trustless**: Trasferimento sicuro di asset tra Ethereum e il Layer-2
 
-I componenti onchain sono implementati in Rust e includono:
+## Architettura
 
-- **lib.rs**: Punto di ingresso del programma Solana
-- **instruction.rs**: Definizione delle istruzioni supportate
-- **processor.rs**: Logica di elaborazione delle istruzioni
-- **processor_deposit.rs**: Gestione dei depositi
-- **processor_transfer.rs**: Gestione dei trasferimenti
-- **processor_withdrawal.rs**: Gestione dei prelievi
-- **state.rs**: Strutture dati per lo stato del programma
-- **error.rs**: Codici di errore del programma
-- **validation.rs**: Logica di validazione delle transazioni
-- **security.rs**: Misure di sicurezza
+Il sistema è composto dai seguenti componenti principali:
 
-### Componenti Offchain
+1. **Contratti su Ethereum (L1)**:
+   - Contratti di bridge per depositi e prelievi
+   - Sistema di commitment degli stati
+   - Meccanismo di sfida per le prove di frode
 
-I componenti offchain sono implementati in JavaScript e includono:
+2. **Nodi Layer-2**:
+   - Sequencer: ordina e processa le transazioni
+   - Validator: verifica le transazioni e genera prove di frode
 
-- **sequencer-worker.js**: Elaborazione parallela delle transazioni
-- **layer2_system.js**: Coordinamento dei componenti del sistema
-- **optimized_sequencer.js**: Sequencer ottimizzato per alte prestazioni
-- **deposit_sequencer.js**: Gestione dei depositi
-- **transfer_sequencer.js**: Gestione dei trasferimenti
-- **withdrawal_sequencer.js**: Gestione dei prelievi
-- **transaction_manager.js**: Gestione delle transazioni
-- **error_manager.js**: Gestione degli errori
-- **gas_optimizer.js**: Ottimizzazione delle commissioni
-- **recovery_system.js**: Meccanismi di recupero
-- **merkle_tree.js**: Implementazione dell'albero di Merkle
+3. **Bridge Bidirezionale**:
+   - Supporto per ETH, USDC, DAI e altri token
+   - Meccanismo di deposito (L1 → L2)
+   - Meccanismo di prelievo (L2 → L1)
 
-### Bridge Ethereum-Solana
+4. **Sistema di Prove di Frode**:
+   - Verifica dell'esecuzione corretta delle transazioni
+   - Gioco di bisection per identificare transizioni di stato invalide
+   - Integrazione con Solana Runtime in modalità deterministica
 
-Il bridge Ethereum-Solana è implementato in Solidity e include:
+## Guida Rapida
 
-- **TokenBridge.sol**: Gestione dei depositi da Ethereum a Solana
-- **WithdrawalBridge.sol**: Gestione dei prelievi da Solana a Ethereum
+### Prerequisiti
 
-### SDK e Client
+- Node.js v16+
+- Rust 1.60+
+- Solana CLI
+- Ethereum client (Geth, Hardhat, ecc.)
 
-L'SDK client è implementato in TypeScript e include:
-
-- **client.ts**: Client SDK per interagire con il Layer-2
-
-## Installazione
-
-Per installare il sistema Layer-2 su Solana, esegui lo script di installazione:
+### Installazione
 
 ```bash
-sudo ./install.sh
+# Clona il repository
+git clone https://github.com/buybotsolana/LAYER-2-COMPLETE.git
+cd LAYER-2-COMPLETE
+
+# Installa le dipendenze
+npm install
+cargo build --release
 ```
 
-Lo script installerà tutte le dipendenze necessarie e configurerà il sistema.
-
-## Documentazione
-
-La documentazione completa del sistema è disponibile nella directory `docs/`. Include:
-
-- **README.md**: Panoramica del sistema
-- **Architettura**: Descrizione dettagliata dell'architettura del sistema
-- **Guida all'installazione**: Istruzioni per l'installazione e la configurazione
-- **Guida all'utilizzo**: Istruzioni per l'utilizzo del sistema
-- **API Reference**: Documentazione dell'API
-- **Esempi**: Esempi di utilizzo del sistema
-
-## Test
-
-Il sistema include una suite completa di test:
-
-- **Test unitari**: Verificano il corretto funzionamento dei singoli componenti
-- **Test di integrazione**: Verificano il corretto funzionamento dei componenti integrati
-- **Test di stress**: Verificano le prestazioni del sistema sotto carico
-- **Test di sicurezza**: Verificano la sicurezza del sistema
-
-Per eseguire i test:
+### Avvio dell'Ambiente Locale
 
 ```bash
-cd tests
-npm install
+# Avvia l'ambiente di test locale
+./scripts/setup-local-testnet.sh
+
+# In un altro terminale, avvia il sequencer
+cd sequencer
+cargo run --release -- --ethereum-rpc http://localhost:8545 --solana-rpc http://localhost:8899
+
+# In un altro terminale, avvia il validator
+cd validator
+cargo run --release -- --ethereum-rpc http://localhost:8545 --solana-rpc http://localhost:8899
+```
+
+### Esecuzione dei Test
+
+```bash
+# Esegui i test unitari
+cargo test --all
+
+# Esegui i test di integrazione
+cd integration
+npm test
+
+# Esegui i test end-to-end
+cd e2e
 npm test
 ```
 
-## Prestazioni
+### Esempio: Hello World su L2
 
-Il sistema è progettato per offrire alte prestazioni:
+```javascript
+// Connessione al Layer-2
+const l2 = new L2Client("http://localhost:3000");
 
-- **Throughput**: Fino a 5.000 TPS (transazioni al secondo)
-- **Latenza**: Meno di 1 secondo per la conferma delle transazioni
-- **Costo**: Riduzione del 95% dei costi di transazione rispetto a Solana mainnet
-- **Scalabilità**: Scalabilità orizzontale attraverso l'aggiunta di worker
+// Creazione di un wallet
+const wallet = Keypair.generate();
 
-## Sicurezza
+// Invio di una transazione
+const tx = new Transaction().add(
+  SystemProgram.transfer({
+    fromPubkey: wallet.publicKey,
+    toPubkey: recipient,
+    lamports: 1000000,
+  })
+);
 
-Il sistema implementa diverse misure di sicurezza:
+const signature = await l2.sendTransaction(tx, wallet);
+console.log("Transazione inviata:", signature);
+```
 
-- **Firme Digitali**: Tutte le transazioni sono firmate con le chiavi private degli utenti
-- **Validazione delle Transazioni**: Le transazioni sono validate sia offchain che onchain
-- **Prove di Merkle**: Le prove di Merkle sono utilizzate per verificare l'inclusione delle transazioni nei batch
-- **Sistema di Validatori Multipli**: Il bridge utilizza un sistema di validatori multipli con soglia di conferma per i prelievi
-- **Circuit Breaker**: Il sistema implementa un pattern Circuit Breaker per prevenire cascate di errori
-- **Rate Limiting**: Il sistema implementa limiti di velocità per prevenire attacchi DoS
-- **Monitoraggio e Analisi degli Errori**: Il sistema monitora e analizza gli errori per identificare potenziali problemi
+## Documentazione
 
-## Stato di Implementazione
+Per una documentazione più dettagliata, consulta:
 
-Il sistema Layer-2 su Solana è stato implementato con successo, raggiungendo un livello di completezza superiore al 50%. Tutti i componenti critici sono stati sviluppati, testati e integrati, creando un sistema funzionale che può essere ulteriormente migliorato e ottimizzato.
+- [Documentazione Architetturale](docs/architecture/)
+- [Riferimento API](docs/api-reference/)
+- [Guide per Sviluppatori](docs/guides/)
 
-Per maggiori dettagli sullo stato di implementazione, consulta il file `implementation-report.md`.
+## Roadmap
+
+- [x] Implementazione del sistema di prove di frode
+- [x] Implementazione della logica di finalizzazione
+- [x] Implementazione del bridge trustless
+- [ ] Supporto per token SPL nativi
+- [ ] Integrazione con wallet Solana esistenti
+- [ ] Supporto per composability tra programmi
+- [ ] Mainnet beta
+
+## Contribuire
+
+Siamo aperti ai contributi! Per favore, leggi le [linee guida per contribuire](CONTRIBUTING.md) prima di inviare pull request.
 
 ## Licenza
 
-Questo progetto è rilasciato sotto la licenza MIT. Vedi il file `LICENSE` per maggiori dettagli.
+Questo progetto è rilasciato sotto la licenza MIT. Vedi il file [LICENSE](LICENSE) per i dettagli.
+
+## Contatti
+
+- GitHub: [buybotsolana](https://github.com/buybotsolana)
+- Email: buybotsolana@tech-center.com
