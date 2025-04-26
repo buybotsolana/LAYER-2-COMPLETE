@@ -1,5 +1,5 @@
 import express from 'express';
-import { Connection, PublicKey, Transaction, SystemProgram } from '@solana/web3.js';
+import { Connection, PublicKey } from '@solana/web3.js';
 import { solanaConnection, layer2Connection, redisClient } from '../index';
 import WormholeBridge from '../services/WormholeBridge';
 import * as bs58 from 'bs58';
@@ -45,17 +45,18 @@ const getWormholeBridge = () => {
 router.get('/status', async (req, res) => {
   try {
     const bridge = getWormholeBridge();
-    const stats = await bridge.getBridgeStats();
+    const health = await bridge.checkHealth();
     
     res.json({
-      status: 'operational',
-      stats
+      status: health.isHealthy ? 'operational' : 'degraded',
+      health
     });
   } catch (error) {
     console.error('Error getting bridge status:', error);
     res.status(500).json({
       error: 'Internal Server Error',
-      message: 'Failed to get bridge status'
+      message: 'Failed to get bridge status',
+      details: error.message
     });
   }
 });
@@ -195,6 +196,13 @@ router.get('/transaction/:signature', async (req, res) => {
     const { signature } = req.params;
     const { isLayer2 } = req.query;
     
+    if (!signature) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Missing required parameter: signature'
+      });
+    }
+    
     // Initialize bridge
     const bridge = getWormholeBridge();
     
@@ -209,7 +217,8 @@ router.get('/transaction/:signature', async (req, res) => {
     console.error('Error getting transaction status:', error);
     res.status(500).json({
       error: 'Internal Server Error',
-      message: 'Failed to get transaction status'
+      message: 'Failed to get transaction status',
+      details: error.message
     });
   }
 });
@@ -220,6 +229,14 @@ router.get('/transaction/:signature', async (req, res) => {
  */
 router.get('/tokens', async (req, res) => {
   try {
+    // Check cache first
+    const cacheKey = 'bridge:supported-tokens';
+    const cachedData = await redisClient.get(cacheKey);
+    
+    if (cachedData) {
+      return res.json(JSON.parse(cachedData));
+    }
+    
     // This would typically come from a database or configuration
     // For demonstration purposes, we'll return a static list
     const supportedTokens = [
@@ -249,12 +266,16 @@ router.get('/tokens', async (req, res) => {
       }
     ];
     
+    // Cache result for 1 hour (token list doesn't change often)
+    await redisClient.set(cacheKey, JSON.stringify(supportedTokens), { EX: 3600 });
+    
     res.json(supportedTokens);
   } catch (error) {
     console.error('Error getting supported tokens:', error);
     res.status(500).json({
       error: 'Internal Server Error',
-      message: 'Failed to get supported tokens'
+      message: 'Failed to get supported tokens',
+      details: error.message
     });
   }
 });

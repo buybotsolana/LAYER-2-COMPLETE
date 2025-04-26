@@ -4,6 +4,7 @@ import * as bs58 from 'bs58';
 import * as crypto from 'crypto';
 import * as dotenv from 'dotenv';
 import { createHmac } from 'crypto';
+import * as AsyncLock from 'async-lock';
 
 // Load environment variables
 dotenv.config();
@@ -25,6 +26,9 @@ export class SecurityManager {
   private fraudDetectionRules: FraudDetectionRule[];
   private securityConfig: SecurityConfig;
   private spentOutputs: Set<string>; // Track spent outputs for double spend detection
+  private lock: AsyncLock; // Lock for concurrent operations
+  private replayCache: Map<string, number>; // Cache for replay attack prevention
+  private connectionRetryConfig: ConnectionRetryConfig; // Configuration for connection retries
 
   /**
    * Constructor for SecurityManager
@@ -43,6 +47,16 @@ export class SecurityManager {
     this.nonceRegistry = new Map();
     this.fraudDetectionRules = [];
     this.spentOutputs = new Set();
+    this.lock = new AsyncLock();
+    this.replayCache = new Map();
+    
+    // Default connection retry configuration
+    this.connectionRetryConfig = {
+      maxRetries: 5,
+      initialDelayMs: 100,
+      maxDelayMs: 5000,
+      backoffFactor: 2
+    };
     
     // Default security configuration
     this.securityConfig = {
@@ -60,11 +74,16 @@ export class SecurityManager {
         'completed': [],
         'failed': ['pending'] // Allow retries from failed state
       },
+      replayCacheTTLSeconds: 3600, // 1 hour TTL for replay cache entries
+      lockTimeoutMs: 5000, // 5 seconds timeout for locks
       ...config
     };
     
     // Initialize fraud detection rules
     this.initFraudDetectionRules();
+    
+    // Start periodic cleanup tasks
+    this.startPeriodicCleanup();
   }
 
   /**
@@ -96,11 +115,89 @@ export class SecurityManager {
   }
 
   /**
+   * Start periodic cleanup tasks
+   */
+  private startPeriodicCleanup() {
+    // Clean up expired nonces every 10 minutes
+    setInterval(async () => {
+      try {
+        const blockHeight = await this.getBlockHeightWithRetry();
+        this.cleanupExpiredNonces(blockHeight);
+      } catch (error) {
+        console.error('Error in periodic nonce cleanup:', error);
+      }
+    }, 10 * 60 * 1000);
+
+    // Clean up expired replay cache entries every hour
+    setInterval(() => {
+      try {
+        this.cleanupReplayCache();
+      } catch (error) {
+        console.error('Error in periodic replay cache cleanup:', error);
+      }
+    }, 60 * 60 * 1000);
+  }
+
+  /**
+   * Clean up expired replay cache entries
+   */
+  private cleanupReplayCache() {
+    const now = Math.floor(Date.now() / 1000);
+    const expiredEntries = [];
+
+    for (const [txId, timestamp] of this.replayCache.entries()) {
+      if (now - timestamp > this.securityConfig.replayCacheTTLSeconds) {
+        expiredEntries.push(txId);
+      }
+    }
+
+    for (const txId of expiredEntries) {
+      this.replayCache.delete(txId);
+    }
+
+    console.log(`Cleaned up ${expiredEntries.length} expired replay cache entries`);
+  }
+
+  /**
+   * Get block height with retry mechanism
+   * @returns Current block height
+   */
+  private async getBlockHeightWithRetry(): Promise<number> {
+    let retries = 0;
+    let delay = this.connectionRetryConfig.initialDelayMs;
+
+    while (retries <= this.connectionRetryConfig.maxRetries) {
+      try {
+        return await this.layer2Connection.getBlockHeight();
+      } catch (error) {
+        retries++;
+        
+        if (retries > this.connectionRetryConfig.maxRetries) {
+          throw new Error(`Failed to get block height after ${retries} retries: ${error.message}`);
+        }
+        
+        console.warn(`Error getting block height (retry ${retries}/${this.connectionRetryConfig.maxRetries}): ${error.message}`);
+        
+        // Exponential backoff
+        await new Promise(resolve => setTimeout(resolve, delay));
+        delay = Math.min(delay * this.connectionRetryConfig.backoffFactor, this.connectionRetryConfig.maxDelayMs);
+      }
+    }
+
+    throw new Error('Failed to get block height');
+  }
+
+  /**
    * Check for rate limiting
    * @param clientId Client identifier (IP address, wallet address, etc.)
    * @returns Whether the request is allowed
    */
   public checkRateLimit(clientId: string): boolean {
+    if (!clientId) {
+      console.warn('Rate limit check called with null or empty clientId');
+      return false;
+    }
+
     const now = Date.now();
     const rateLimitInfo = this.rateLimits.get(clientId);
     
@@ -141,33 +238,59 @@ export class SecurityManager {
    * @param nonce Transaction nonce
    * @returns Whether the nonce is valid
    */
-  public verifyNonce(transaction: Transaction, nonce: string): boolean {
-    // Check if nonce has been used before
-    if (this.nonceRegistry.has(nonce)) {
-      console.warn(`Nonce ${nonce} has already been used`);
+  public async verifyNonce(transaction: Transaction, nonce: string): Promise<boolean> {
+    if (!nonce) {
+      console.warn('Nonce verification called with null or empty nonce');
       return false;
     }
-    
-    // Register nonce with current block height
-    this.layer2Connection.getBlockHeight().then(blockHeight => {
-      this.nonceRegistry.set(nonce, blockHeight);
-      
-      // Clean up expired nonces
-      this.cleanupExpiredNonces(blockHeight);
+
+    // Use lock to prevent race conditions when checking/updating nonces
+    return this.lock.acquire('nonce', async () => {
+      try {
+        // Check if nonce has been used before
+        if (this.nonceRegistry.has(nonce)) {
+          console.warn(`Nonce ${nonce} has already been used`);
+          return false;
+        }
+        
+        // Register nonce with current block height
+        const blockHeight = await this.getBlockHeightWithRetry();
+        this.nonceRegistry.set(nonce, blockHeight);
+        
+        // Clean up expired nonces
+        this.cleanupExpiredNonces(blockHeight);
+        
+        return true;
+      } catch (error) {
+        console.error(`Error verifying nonce: ${error.message}`);
+        // In case of error, reject the nonce to be safe
+        return false;
+      }
+    }, { timeout: this.securityConfig.lockTimeoutMs }).catch(error => {
+      console.error(`Lock timeout during nonce verification: ${error.message}`);
+      return false;
     });
-    
-    return true;
   }
 
   /**
    * Clean up expired nonces
    * @param currentBlockHeight Current block height
    */
-  private async cleanupExpiredNonces(currentBlockHeight: number) {
+  private cleanupExpiredNonces(currentBlockHeight: number) {
+    const expiredNonces = [];
+
     for (const [nonce, blockHeight] of this.nonceRegistry.entries()) {
       if (currentBlockHeight - blockHeight > this.securityConfig.nonceExpirationBlocks) {
-        this.nonceRegistry.delete(nonce);
+        expiredNonces.push(nonce);
       }
+    }
+
+    for (const nonce of expiredNonces) {
+      this.nonceRegistry.delete(nonce);
+    }
+
+    if (expiredNonces.length > 0) {
+      console.log(`Cleaned up ${expiredNonces.length} expired nonces`);
     }
   }
 
@@ -177,6 +300,13 @@ export class SecurityManager {
    * @returns Validation result
    */
   public validateTransaction(transaction: Transaction): ValidationResult {
+    if (!transaction) {
+      return {
+        valid: false,
+        error: 'Transaction is null or undefined'
+      };
+    }
+
     try {
       // Check transaction size
       const serializedTx = transaction.serialize();
@@ -213,6 +343,31 @@ export class SecurityManager {
   }
 
   /**
+   * Check for replay attacks
+   * @param transactionId Transaction ID to check
+   * @returns Whether the transaction is a replay
+   */
+  public checkReplayAttack(transactionId: string): boolean {
+    if (!transactionId) {
+      console.warn('Replay check called with null or empty transactionId');
+      return true; // Consider it a replay to be safe
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    
+    // Check if transaction ID exists in cache
+    if (this.replayCache.has(transactionId)) {
+      console.warn(`Replay attack detected: transaction ${transactionId} has already been processed`);
+      return true;
+    }
+    
+    // Add transaction ID to cache with current timestamp
+    this.replayCache.set(transactionId, now);
+    
+    return false;
+  }
+
+  /**
    * Verify API key
    * @param apiKey API key to verify
    * @param timestamp Request timestamp
@@ -220,6 +375,11 @@ export class SecurityManager {
    * @returns Whether the API key is valid
    */
   public verifyApiKey(apiKey: string, timestamp: string, signature: string): boolean {
+    if (!apiKey || !timestamp || !signature) {
+      console.warn('API key verification called with null or empty parameters');
+      return false;
+    }
+
     try {
       // Check if timestamp is within acceptable range (5 minutes)
       const now = Math.floor(Date.now() / 1000);
@@ -254,6 +414,10 @@ export class SecurityManager {
    * @returns Generated API key
    */
   public generateApiKey(userId: string): ApiKeyInfo {
+    if (!userId) {
+      throw new Error('User ID is required to generate API key');
+    }
+
     const apiKey = crypto.randomBytes(16).toString('hex');
     const secret = crypto.randomBytes(32).toString('hex');
     
@@ -271,31 +435,45 @@ export class SecurityManager {
    * @returns Validation result
    */
   private checkDoubleSpend(transaction: Transaction): ValidationResult {
+    if (!transaction) {
+      return {
+        valid: false,
+        error: 'Transaction is null or undefined'
+      };
+    }
+
     try {
       // Extract transaction inputs (references to previous outputs)
       const inputs = this.extractTransactionInputs(transaction);
       
-      // Check if any input has been spent already
-      for (const input of inputs) {
-        const inputId = this.getInputId(input);
-        if (this.spentOutputs.has(inputId)) {
-          return {
-            valid: false,
-            error: `Double spend detected: input ${inputId} has already been spent`
-          };
+      // Use lock to prevent race conditions when checking/updating spent outputs
+      return this.lock.acquire('spentOutputs', () => {
+        // Check if any input has been spent already
+        for (const input of inputs) {
+          const inputId = this.getInputId(input);
+          if (this.spentOutputs.has(inputId)) {
+            return {
+              valid: false,
+              error: `Double spend detected: input ${inputId} has already been spent`
+            };
+          }
         }
-      }
-      
-      // Mark inputs as spent (will be committed after transaction is confirmed)
-      for (const input of inputs) {
-        const inputId = this.getInputId(input);
-        this.spentOutputs.add(inputId);
-      }
-      
-      return { valid: true };
+        
+        // Mark inputs as spent (will be committed after transaction is confirmed)
+        for (const input of inputs) {
+          const inputId = this.getInputId(input);
+          this.spentOutputs.add(inputId);
+        }
+        
+        return { valid: true };
+      }, { timeout: this.securityConfig.lockTimeoutMs });
     } catch (error) {
       console.error('Double spend check error:', error);
-      return { valid: true }; // Fallback to valid in case of error
+      // In case of error, reject the transaction to be safe
+      return { 
+        valid: false,
+        error: `Double spend check error: ${error.message}`
+      };
     }
   }
 
@@ -305,14 +483,18 @@ export class SecurityManager {
    * @returns Array of transaction inputs
    */
   private extractTransactionInputs(transaction: Transaction): any[] {
-    // This is a simplified implementation
-    // In a real system, you would extract the actual inputs from the transaction
-    // based on your specific transaction format
-    
+    if (!transaction || !transaction.instructions) {
+      return [];
+    }
+
     const inputs = [];
     
     // Example: Extract input references from transaction data
     for (const instruction of transaction.instructions) {
+      if (!instruction || !instruction.programId) {
+        continue;
+      }
+
       // Parse instruction data to extract input references
       // This is highly dependent on your specific transaction format
       
@@ -335,6 +517,10 @@ export class SecurityManager {
    * @returns Unique identifier
    */
   private getInputId(input: any): string {
+    if (!input || !input.previousTxId) {
+      throw new Error('Invalid input: missing previousTxId');
+    }
+    
     return `${input.previousTxId}:${input.outputIndex}`;
   }
 
@@ -344,6 +530,13 @@ export class SecurityManager {
    * @returns Validation result
    */
   private checkInvalidStateTransition(transaction: Transaction): ValidationResult {
+    if (!transaction) {
+      return {
+        valid: false,
+        error: 'Transaction is null or undefined'
+      };
+    }
+
     try {
       // Extract state transition from transaction
       const stateTransition = this.extractStateTransition(transaction);
@@ -367,7 +560,10 @@ export class SecurityManager {
       return { valid: true };
     } catch (error) {
       console.error('State transition check error:', error);
-      return { valid: true }; // Fallback to valid in case of error
+      return { 
+        valid: false,
+        error: `State transition check error: ${error.message}`
+      };
     }
   }
 
@@ -377,13 +573,21 @@ export class SecurityManager {
    * @returns State transition or null if no state transition
    */
   private extractStateTransition(transaction: Transaction): StateTransition | null {
+    if (!transaction || !transaction.instructions) {
+      return null;
+    }
+
     // This is a simplified implementation
     // In a real system, you would extract the actual state transition from the transaction
     // based on your specific transaction format
     
     // For demonstration purposes, we'll check if any instruction has data that looks like a state transition
     for (const instruction of transaction.instructions) {
-      if (instruction.data.length >= 2) {
+      if (!instruction || !instruction.data) {
+        continue;
+      }
+
+      if (instruction.data.length >= 3) { // Ensure we have enough data
         // Assume first byte is a command code and second byte is a state code
         const commandCode = instruction.data[0];
         
@@ -417,9 +621,16 @@ export class SecurityManager {
    * @returns Validation result
    */
   private checkMalformedTransaction(transaction: Transaction): ValidationResult {
+    if (!transaction) {
+      return {
+        valid: false,
+        error: 'Transaction is null or undefined'
+      };
+    }
+
     try {
       // Check if transaction has at least one instruction
-      if (transaction.instructions.length === 0) {
+      if (!transaction.instructions || transaction.instructions.length === 0) {
         return {
           valid: false,
           error: 'Transaction has no instructions'
@@ -429,6 +640,14 @@ export class SecurityManager {
       // Check if each instruction has a program ID
       for (let i = 0; i < transaction.instructions.length; i++) {
         const instruction = transaction.instructions[i];
+        
+        if (!instruction) {
+          return {
+            valid: false,
+            error: `Instruction ${i} is null or undefined`
+          };
+        }
+        
         if (!instruction.programId) {
           return {
             valid: false,
@@ -476,6 +695,13 @@ export class SecurityManager {
    * @returns Validation result
    */
   private checkExcessiveGasUsage(transaction: Transaction): ValidationResult {
+    if (!transaction) {
+      return {
+        valid: false,
+        error: 'Transaction is null or undefined'
+      };
+    }
+
     try {
       // Estimate gas usage for the transaction
       const estimatedGas = this.estimateGasUsage(transaction);
@@ -491,7 +717,10 @@ export class SecurityManager {
       return { valid: true };
     } catch (error) {
       console.error('Gas usage check error:', error);
-      return { valid: true }; // Fallback to valid in case of error
+      return { 
+        valid: false,
+        error: `Gas usage check error: ${error.message}`
+      };
     }
   }
 
@@ -501,6 +730,10 @@ export class SecurityManager {
    * @returns Estimated gas usage
    */
   private estimateGasUsage(transaction: Transaction): number {
+    if (!transaction || !transaction.instructions) {
+      return 0;
+    }
+
     // This is a simplified implementation
     // In a real system, you would use a more accurate gas estimation model
     
@@ -509,14 +742,22 @@ export class SecurityManager {
     
     // Add gas for each instruction
     for (const instruction of transaction.instructions) {
+      if (!instruction) {
+        continue;
+      }
+
       // Gas for instruction overhead
       gasUsage += 5000;
       
       // Gas for instruction data
-      gasUsage += instruction.data.length * 68;
+      if (instruction.data) {
+        gasUsage += instruction.data.length * 68;
+      }
       
       // Gas for each account reference
-      gasUsage += instruction.keys.length * 2500;
+      if (instruction.keys) {
+        gasUsage += instruction.keys.length * 2500;
+      }
     }
     
     return gasUsage;
@@ -528,9 +769,38 @@ export class SecurityManager {
    * @returns Fraud detection result
    */
   public async detectFraudInBlock(blockNumber: number): Promise<FraudDetectionResult> {
+    if (blockNumber < 0) {
+      return {
+        blockNumber,
+        fraudDetected: false,
+        error: 'Invalid block number'
+      };
+    }
+
     try {
-      // Get block
-      const block = await this.layer2Connection.getBlock(blockNumber);
+      // Get block with retry mechanism
+      let block = null;
+      let retries = 0;
+      let delay = this.connectionRetryConfig.initialDelayMs;
+
+      while (retries <= this.connectionRetryConfig.maxRetries) {
+        try {
+          block = await this.layer2Connection.getBlock(blockNumber);
+          break;
+        } catch (error) {
+          retries++;
+          
+          if (retries > this.connectionRetryConfig.maxRetries) {
+            throw new Error(`Failed to get block after ${retries} retries: ${error.message}`);
+          }
+          
+          console.warn(`Error getting block (retry ${retries}/${this.connectionRetryConfig.maxRetries}): ${error.message}`);
+          
+          // Exponential backoff
+          await new Promise(resolve => setTimeout(resolve, delay));
+          delay = Math.min(delay * this.connectionRetryConfig.backoffFactor, this.connectionRetryConfig.maxDelayMs);
+        }
+      }
       
       if (!block) {
         return {
@@ -551,6 +821,14 @@ export class SecurityManager {
       
       // Validate each transaction
       for (let i = 0; i < block.transactions.length; i++) {
+        if (!block.transactions[i] || !block.transactions[i].transaction) {
+          return {
+            blockNumber,
+            fraudDetected: true,
+            reason: `Invalid transaction at index ${i}: Transaction is null or undefined`
+          };
+        }
+
         const transaction = block.transactions[i].transaction;
         const validationResult = this.validateTransaction(transaction);
         
@@ -582,24 +860,54 @@ export class SecurityManager {
    * @returns Whether the validator has sufficient stake
    */
   public async verifyValidatorStake(validatorPubkey: PublicKey): Promise<boolean> {
+    if (!validatorPubkey) {
+      console.warn('Validator stake verification called with null or undefined public key');
+      return false;
+    }
+
     try {
-      // Get validator stake account
-      const stakeAccounts = await this.connection.getParsedProgramAccounts(
-        SystemProgram.programId,
-        {
-          filters: [
+      // Get validator stake account with retry mechanism
+      let stakeAccounts = null;
+      let retries = 0;
+      let delay = this.connectionRetryConfig.initialDelayMs;
+
+      while (retries <= this.connectionRetryConfig.maxRetries) {
+        try {
+          stakeAccounts = await this.connection.getParsedProgramAccounts(
+            SystemProgram.programId,
             {
-              dataSize: 200, // Approximate size of stake account data
-            },
-            {
-              memcmp: {
-                offset: 12, // Offset of stake authority
-                bytes: validatorPubkey.toBase58(),
-              },
-            },
-          ],
+              filters: [
+                {
+                  dataSize: 200, // Approximate size of stake account data
+                },
+                {
+                  memcmp: {
+                    offset: 12, // Offset of stake authority
+                    bytes: validatorPubkey.toBase58(),
+                  },
+                },
+              ],
+            }
+          );
+          break;
+        } catch (error) {
+          retries++;
+          
+          if (retries > this.connectionRetryConfig.maxRetries) {
+            throw new Error(`Failed to get stake accounts after ${retries} retries: ${error.message}`);
+          }
+          
+          console.warn(`Error getting stake accounts (retry ${retries}/${this.connectionRetryConfig.maxRetries}): ${error.message}`);
+          
+          // Exponential backoff
+          await new Promise(resolve => setTimeout(resolve, delay));
+          delay = Math.min(delay * this.connectionRetryConfig.backoffFactor, this.connectionRetryConfig.maxDelayMs);
         }
-      );
+      }
+      
+      if (!stakeAccounts) {
+        return false;
+      }
       
       // Calculate total stake
       let totalStake = new BN(0);
@@ -651,6 +959,18 @@ interface SecurityConfig {
   stateTransitionRules: {
     [fromState: string]: string[];
   };
+  replayCacheTTLSeconds: number;
+  lockTimeoutMs: number;
+}
+
+/**
+ * Connection retry configuration
+ */
+interface ConnectionRetryConfig {
+  maxRetries: number;
+  initialDelayMs: number;
+  maxDelayMs: number;
+  backoffFactor: number;
 }
 
 /**
