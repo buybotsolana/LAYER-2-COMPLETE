@@ -19,11 +19,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Withdrawal status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum WithdrawalStatus {
-    /// Withdrawal is initiated
-    Initiated,
+    /// Withdrawal is pending
+    Pending,
     
-    /// Withdrawal is proven
-    Proven,
+    /// Withdrawal is confirmed
+    Confirmed,
     
     /// Withdrawal is finalized
     Finalized,
@@ -62,30 +62,8 @@ pub struct Withdrawal {
     /// Status
     pub status: WithdrawalStatus,
     
-    /// Proof
-    pub proof: Option<WithdrawalProof>,
-    
     /// L1 transaction hash (if finalized)
     pub l1_tx_hash: Option<[u8; 32]>,
-}
-
-/// Withdrawal proof
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
-pub struct WithdrawalProof {
-    /// Merkle proof
-    pub merkle_proof: Vec<[u8; 32]>,
-    
-    /// Merkle root
-    pub merkle_root: [u8; 32],
-    
-    /// Leaf index
-    pub leaf_index: u64,
-    
-    /// Block number
-    pub block_number: u64,
-    
-    /// Timestamp
-    pub timestamp: u64,
 }
 
 /// Withdrawal handler for the Layer-2 system
@@ -101,20 +79,16 @@ pub struct WithdrawalHandler {
     
     /// Maximum withdrawal amounts per token
     pub max_withdrawal_amounts: HashMap<[u8; 20], u64>,
-    
-    /// Challenge period in seconds
-    pub challenge_period: u64,
 }
 
 impl WithdrawalHandler {
     /// Create a new withdrawal handler
-    pub fn new(challenge_period: u64) -> Self {
+    pub fn new() -> Self {
         let mut handler = Self {
             withdrawals: HashMap::new(),
             supported_tokens: Vec::new(),
             min_withdrawal_amounts: HashMap::new(),
             max_withdrawal_amounts: HashMap::new(),
-            challenge_period,
         };
         
         // Add native token (ETH) as supported
@@ -171,8 +145,8 @@ impl WithdrawalHandler {
         Ok(())
     }
     
-    /// Initiate a withdrawal from L2 to L1
-    pub fn initiate_withdrawal(
+    /// Process a withdrawal from L2
+    pub fn process_withdrawal(
         &mut self,
         l2_tx_hash: [u8; 32],
         l2_block_number: u64,
@@ -229,8 +203,7 @@ impl WithdrawalHandler {
             token,
             amount,
             timestamp: now,
-            status: WithdrawalStatus::Initiated,
-            proof: None,
+            status: WithdrawalStatus::Pending,
             l1_tx_hash: None,
         };
         
@@ -240,14 +213,10 @@ impl WithdrawalHandler {
         Ok(id)
     }
     
-    /// Prove a withdrawal
-    pub fn prove_withdrawal(
+    /// Confirm a withdrawal
+    pub fn confirm_withdrawal(
         &mut self,
         id: [u8; 32],
-        merkle_proof: Vec<[u8; 32]>,
-        merkle_root: [u8; 32],
-        leaf_index: u64,
-        block_number: u64,
     ) -> Result<(), String> {
         // Check if the withdrawal exists
         let withdrawal = match self.withdrawals.get_mut(&id) {
@@ -255,29 +224,13 @@ impl WithdrawalHandler {
             None => return Err(format!("Withdrawal with ID {:?} does not exist", id)),
         };
         
-        // Check if the withdrawal is initiated
-        if withdrawal.status != WithdrawalStatus::Initiated {
-            return Err(format!("Withdrawal with ID {:?} is not initiated", id));
+        // Check if the withdrawal is pending
+        if withdrawal.status != WithdrawalStatus::Pending {
+            return Err(format!("Withdrawal with ID {:?} is not pending", id));
         }
         
-        // Get the current timestamp
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        
-        // Create the proof
-        let proof = WithdrawalProof {
-            merkle_proof,
-            merkle_root,
-            leaf_index,
-            block_number,
-            timestamp: now,
-        };
-        
-        // Update the withdrawal
-        withdrawal.status = WithdrawalStatus::Proven;
-        withdrawal.proof = Some(proof);
+        // Update the withdrawal status
+        withdrawal.status = WithdrawalStatus::Confirmed;
         
         Ok(())
     }
@@ -294,23 +247,12 @@ impl WithdrawalHandler {
             None => return Err(format!("Withdrawal with ID {:?} does not exist", id)),
         };
         
-        // Check if the withdrawal is proven
-        if withdrawal.status != WithdrawalStatus::Proven {
-            return Err(format!("Withdrawal with ID {:?} is not proven", id));
+        // Check if the withdrawal is confirmed
+        if withdrawal.status != WithdrawalStatus::Confirmed {
+            return Err(format!("Withdrawal with ID {:?} is not confirmed", id));
         }
         
-        // Check if the challenge period has passed
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        
-        let proof_timestamp = withdrawal.proof.as_ref().unwrap().timestamp;
-        if now < proof_timestamp + self.challenge_period {
-            return Err(format!("Challenge period for withdrawal with ID {:?} has not passed", id));
-        }
-        
-        // Update the withdrawal
+        // Update the withdrawal status
         withdrawal.status = WithdrawalStatus::Finalized;
         withdrawal.l1_tx_hash = Some(l1_tx_hash);
         
@@ -329,8 +271,8 @@ impl WithdrawalHandler {
             None => return Err(format!("Withdrawal with ID {:?} does not exist", id)),
         };
         
-        // Check if the withdrawal is initiated or proven
-        if withdrawal.status != WithdrawalStatus::Initiated && withdrawal.status != WithdrawalStatus::Proven {
+        // Check if the withdrawal is pending or confirmed
+        if withdrawal.status != WithdrawalStatus::Pending && withdrawal.status != WithdrawalStatus::Confirmed {
             return Err(format!("Withdrawal with ID {:?} cannot be rejected", id));
         }
         
@@ -373,28 +315,6 @@ impl WithdrawalHandler {
             .filter(|withdrawal| withdrawal.l1_recipient == l1_recipient)
             .collect()
     }
-    
-    /// Verify a withdrawal proof
-    pub fn verify_withdrawal_proof(
-        &self,
-        id: [u8; 32],
-    ) -> Result<bool, String> {
-        // Check if the withdrawal exists
-        let withdrawal = match self.withdrawals.get(&id) {
-            Some(withdrawal) => withdrawal,
-            None => return Err(format!("Withdrawal with ID {:?} does not exist", id)),
-        };
-        
-        // Check if the withdrawal has a proof
-        let proof = match &withdrawal.proof {
-            Some(proof) => proof,
-            None => return Err(format!("Withdrawal with ID {:?} has no proof", id)),
-        };
-        
-        // In a real implementation, we would verify the Merkle proof
-        // For now, we'll assume all proofs are valid
-        Ok(true)
-    }
 }
 
 /// Withdrawal instruction types
@@ -418,8 +338,8 @@ pub enum WithdrawalInstruction {
         token: [u8; 20],
     },
     
-    /// Initiate a withdrawal from L2 to L1
-    InitiateWithdrawal {
+    /// Process a withdrawal from L2
+    ProcessWithdrawal {
         /// L2 transaction hash
         l2_tx_hash: [u8; 32],
         
@@ -436,22 +356,10 @@ pub enum WithdrawalInstruction {
         amount: u64,
     },
     
-    /// Prove a withdrawal
-    ProveWithdrawal {
+    /// Confirm a withdrawal
+    ConfirmWithdrawal {
         /// Withdrawal ID
         id: [u8; 32],
-        
-        /// Merkle proof
-        merkle_proof: Vec<[u8; 32]>,
-        
-        /// Merkle root
-        merkle_root: [u8; 32],
-        
-        /// Leaf index
-        leaf_index: u64,
-        
-        /// Block number
-        block_number: u64,
     },
     
     /// Finalize a withdrawal
@@ -532,7 +440,7 @@ pub fn process_instruction(
             
             Ok(())
         },
-        WithdrawalInstruction::InitiateWithdrawal {
+        WithdrawalInstruction::ProcessWithdrawal {
             l2_tx_hash,
             l2_block_number,
             l1_recipient,
@@ -552,26 +460,22 @@ pub fn process_instruction(
             
             // In a real implementation, we would:
             // 1. Deserialize the withdrawal handler account
-            // 2. Initiate the withdrawal
+            // 2. Process the withdrawal
             // 3. Serialize the updated withdrawal handler account
             
-            // For now, we just log the initiation
-            msg!("Initiated withdrawal from {:?} to {:?}", sender_info.key, l1_recipient);
+            // For now, we just log the withdrawal
+            msg!("Processed withdrawal to {:?}", l1_recipient);
             
             Ok(())
         },
-        WithdrawalInstruction::ProveWithdrawal {
+        WithdrawalInstruction::ConfirmWithdrawal {
             id,
-            merkle_proof,
-            merkle_root,
-            leaf_index,
-            block_number,
         } => {
-            // Get the prover account
-            let prover_info = next_account_info(account_info_iter)?;
+            // Get the validator account
+            let validator_info = next_account_info(account_info_iter)?;
             
-            // Check if the prover is a signer
-            if !prover_info.is_signer {
+            // Check if the validator is a signer
+            if !validator_info.is_signer {
                 return Err(ProgramError::MissingRequiredSignature);
             }
             
@@ -580,11 +484,11 @@ pub fn process_instruction(
             
             // In a real implementation, we would:
             // 1. Deserialize the withdrawal handler account
-            // 2. Prove the withdrawal
+            // 2. Confirm the withdrawal
             // 3. Serialize the updated withdrawal handler account
             
-            // For now, we just log the proof
-            msg!("Proved withdrawal with ID: {:?}", id);
+            // For now, we just log the confirmation
+            msg!("Confirmed withdrawal with ID: {:?}", id);
             
             Ok(())
         },
@@ -592,11 +496,11 @@ pub fn process_instruction(
             id,
             l1_tx_hash,
         } => {
-            // Get the finalizer account
-            let finalizer_info = next_account_info(account_info_iter)?;
+            // Get the relayer account
+            let relayer_info = next_account_info(account_info_iter)?;
             
-            // Check if the finalizer is a signer
-            if !finalizer_info.is_signer {
+            // Check if the relayer is a signer
+            if !relayer_info.is_signer {
                 return Err(ProgramError::MissingRequiredSignature);
             }
             
@@ -617,11 +521,11 @@ pub fn process_instruction(
             id,
             reason,
         } => {
-            // Get the rejecter account
-            let rejecter_info = next_account_info(account_info_iter)?;
+            // Get the validator account
+            let validator_info = next_account_info(account_info_iter)?;
             
-            // Check if the rejecter is a signer
-            if !rejecter_info.is_signer {
+            // Check if the validator is a signer
+            if !validator_info.is_signer {
                 return Err(ProgramError::MissingRequiredSignature);
             }
             
@@ -647,26 +551,35 @@ mod tests {
     
     #[test]
     fn test_withdrawal_handler() {
-        // Create a withdrawal handler with a 10-second challenge period
-        let mut withdrawal_handler = WithdrawalHandler::new(10);
+        // Create a withdrawal handler
+        let mut handler = WithdrawalHandler::new();
         
-        // Add a supported token
+        // Test adding and removing supported tokens
         let token = [1; 20];
-        let result = withdrawal_handler.add_supported_token(
-            token,
-            1_000_000, // 1 token
-            1_000_000_000_000, // 1,000,000 tokens
-        );
+        let min_amount = 1_000_000;
+        let max_amount = 1_000_000_000;
+        
+        let result = handler.add_supported_token(token, min_amount, max_amount);
         assert!(result.is_ok());
         
-        // Initiate a withdrawal
+        assert!(handler.supported_tokens.contains(&token));
+        assert_eq!(handler.min_withdrawal_amounts.get(&token), Some(&min_amount));
+        assert_eq!(handler.max_withdrawal_amounts.get(&token), Some(&max_amount));
+        
+        let result = handler.remove_supported_token(token);
+        assert!(result.is_ok());
+        
+        assert!(!handler.supported_tokens.contains(&token));
+        
+        // Test processing a withdrawal
         let l2_tx_hash = [2; 32];
-        let l2_block_number = 1;
+        let l2_block_number = 100;
         let l2_sender = [3; 32];
         let l1_recipient = [4; 20];
-        let amount = 5_000_000; // 5 tokens
+        let token = [0; 20]; // Use native token (ETH)
+        let amount = 2_000_000_000_000_000; // 0.002 ETH
         
-        let result = withdrawal_handler.initiate_withdrawal(
+        let result = handler.process_withdrawal(
             l2_tx_hash,
             l2_block_number,
             l2_sender,
@@ -674,59 +587,50 @@ mod tests {
             token,
             amount,
         );
-        assert!(result.is_ok());
-        let id = result.unwrap();
         
-        // Get the withdrawal
-        let withdrawal = withdrawal_handler.get_withdrawal(id).unwrap();
+        assert!(result.is_ok());
+        
+        let withdrawal_id = result.unwrap();
+        
+        // Test getting the withdrawal
+        let withdrawal = handler.get_withdrawal(withdrawal_id).unwrap();
         assert_eq!(withdrawal.l2_tx_hash, l2_tx_hash);
         assert_eq!(withdrawal.l2_block_number, l2_block_number);
         assert_eq!(withdrawal.l2_sender, l2_sender);
         assert_eq!(withdrawal.l1_recipient, l1_recipient);
         assert_eq!(withdrawal.token, token);
         assert_eq!(withdrawal.amount, amount);
-        assert_eq!(withdrawal.status, WithdrawalStatus::Initiated);
+        assert_eq!(withdrawal.status, WithdrawalStatus::Pending);
         
-        // Prove the withdrawal
-        let merkle_proof = vec![[5; 32], [6; 32]];
-        let merkle_root = [7; 32];
-        let leaf_index = 8;
-        let block_number = 9;
-        
-        let result = withdrawal_handler.prove_withdrawal(
-            id,
-            merkle_proof.clone(),
-            merkle_root,
-            leaf_index,
-            block_number,
-        );
+        // Test confirming the withdrawal
+        let result = handler.confirm_withdrawal(withdrawal_id);
         assert!(result.is_ok());
         
-        // Get the withdrawal again
-        let withdrawal = withdrawal_handler.get_withdrawal(id).unwrap();
-        assert_eq!(withdrawal.status, WithdrawalStatus::Proven);
-        assert!(withdrawal.proof.is_some());
-        let proof = withdrawal.proof.as_ref().unwrap();
-        assert_eq!(proof.merkle_proof, merkle_proof);
-        assert_eq!(proof.merkle_root, merkle_root);
-        assert_eq!(proof.leaf_index, leaf_index);
-        assert_eq!(proof.block_number, block_number);
+        let withdrawal = handler.get_withdrawal(withdrawal_id).unwrap();
+        assert_eq!(withdrawal.status, WithdrawalStatus::Confirmed);
         
-        // Verify the withdrawal proof
-        let result = withdrawal_handler.verify_withdrawal_proof(id);
-        assert!(result.is_ok());
-        assert!(result.unwrap());
-        
-        // Finalize the withdrawal
-        // Note: In a real test, we would need to wait for the challenge period to pass
-        // For this test, we'll assume it has passed
-        let l1_tx_hash = [10; 32];
-        let result = withdrawal_handler.finalize_withdrawal(id, l1_tx_hash);
+        // Test finalizing the withdrawal
+        let l1_tx_hash = [5; 32];
+        let result = handler.finalize_withdrawal(withdrawal_id, l1_tx_hash);
         assert!(result.is_ok());
         
-        // Get the withdrawal again
-        let withdrawal = withdrawal_handler.get_withdrawal(id).unwrap();
+        let withdrawal = handler.get_withdrawal(withdrawal_id).unwrap();
         assert_eq!(withdrawal.status, WithdrawalStatus::Finalized);
         assert_eq!(withdrawal.l1_tx_hash, Some(l1_tx_hash));
+        
+        // Test getting withdrawals by status
+        let finalized_withdrawals = handler.get_withdrawals_by_status(WithdrawalStatus::Finalized);
+        assert_eq!(finalized_withdrawals.len(), 1);
+        assert_eq!(finalized_withdrawals[0].id, withdrawal_id);
+        
+        // Test getting withdrawals by sender
+        let sender_withdrawals = handler.get_withdrawals_by_l2_sender(l2_sender);
+        assert_eq!(sender_withdrawals.len(), 1);
+        assert_eq!(sender_withdrawals[0].id, withdrawal_id);
+        
+        // Test getting withdrawals by recipient
+        let recipient_withdrawals = handler.get_withdrawals_by_l1_recipient(l1_recipient);
+        assert_eq!(recipient_withdrawals.len(), 1);
+        assert_eq!(recipient_withdrawals[0].id, withdrawal_id);
     }
 }

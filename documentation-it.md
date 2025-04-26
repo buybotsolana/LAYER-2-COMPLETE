@@ -1,190 +1,117 @@
-# Layer-2 su Solana: Documentazione Completa
+# Layer-2 su Solana - Documentazione Completa
 
 ## Panoramica
 
-Layer-2 su Solana è un'implementazione di un Optimistic Rollup che utilizza la Solana Virtual Machine. Questo sistema consente di aumentare la scalabilità dell'ecosistema Solana, mantenendo al contempo un alto livello di sicurezza e decentralizzazione.
+Questo progetto implementa una soluzione Layer-2 su Solana utilizzando un Optimistic Rollup con la Solana Virtual Machine (SVM) come layer di esecuzione. Il sistema è progettato per offrire scalabilità, sicurezza e interoperabilità tra Ethereum (L1) e Solana.
 
-## Architettura del Sistema
+## Architettura
 
-Il sistema è composto da diversi componenti principali:
+L'architettura del sistema è composta da tre componenti principali:
 
-1. **Sistema di Fraud Proof**: Verifica la validità delle transazioni e consente di contestare transazioni invalide.
+1. **Sistema di Prove di Frode**: Responsabile della verifica della validità delle transazioni e della contestazione di transazioni invalide.
 2. **Sistema di Finalizzazione**: Gestisce la finalizzazione dei blocchi e il commitment degli stati.
-3. **Bridge**: Gestisce il trasferimento di asset tra Layer-1 (Solana) e Layer-2.
-4. **Interfacce Standardizzate**: Garantiscono la coerenza e l'interoperabilità tra i componenti.
-5. **Gestione degli Errori**: Fornisce meccanismi robusti per la gestione degli errori e il ripristino.
+3. **Bridge**: Gestisce i trasferimenti di asset tra Ethereum (L1) e Solana Layer-2.
 
-## Componenti Principali
+### Sistema di Prove di Frode
 
-### Sistema di Fraud Proof
+Il Sistema di Prove di Frode è il cuore della sicurezza del Layer-2. Implementa un meccanismo di verifica che consente di contestare transazioni invalide attraverso un gioco di bisection interattivo. Questo garantisce che solo le transazioni valide vengano finalizzate.
 
-Il sistema di Fraud Proof è responsabile della verifica della validità delle transazioni e della contestazione di transazioni invalide. Utilizza un gioco di bisezione per identificare il punto esatto di disaccordo in una sequenza di transazioni.
-
-**File principali**:
-- `src/fraud_proof_system/mod.rs`: Modulo principale del sistema di Fraud Proof
-- `src/fraud_proof_system/fraud_proof.rs`: Implementazione dei fraud proof
-- `src/fraud_proof_system/bisection.rs`: Implementazione del gioco di bisezione
-- `src/fraud_proof_system/merkle_tree.rs`: Implementazione dell'albero di Merkle
-- `src/fraud_proof_system/state_transition.rs`: Gestione delle transizioni di stato
-- `src/fraud_proof_system/verification.rs`: Verifica dei fraud proof
-- `src/fraud_proof_system/solana_runtime_wrapper.rs`: Wrapper per il runtime di Solana
+Componenti principali:
+- `FraudProofSystem`: Gestisce la generazione, la verifica e lo storage delle prove di frode.
+- `BisectionGame`: Implementa il gioco di bisection per la verifica interattiva delle transazioni contestate.
+- `MerkleTree`: Fornisce una struttura dati efficiente per la verifica delle prove di stato.
+- `StateTransition`: Gestisce le transizioni di stato e la loro validazione.
+- `SolanaRuntimeWrapper`: Wrapper per l'esecuzione di transazioni Solana in un ambiente controllato.
 
 ### Sistema di Finalizzazione
 
-Il sistema di Finalizzazione gestisce la finalizzazione dei blocchi e il commitment degli stati. Garantisce che i blocchi siano finalizzati solo dopo un periodo di contestazione.
+Il Sistema di Finalizzazione gestisce il processo di finalizzazione dei blocchi e degli stati. Implementa un periodo di challenge durante il quale i blocchi possono essere contestati prima di diventare finali e irreversibili.
 
-**File principali**:
-- `src/finalization/mod.rs`: Modulo principale del sistema di Finalizzazione
-- `src/finalization/block_finalization.rs`: Finalizzazione dei blocchi
-- `src/finalization/state_commitment.rs`: Commitment degli stati
-- `src/finalization/output_oracle.rs`: Oracle per gli output di Layer-2
+Componenti principali:
+- `FinalizationManager`: Coordina il processo di finalizzazione.
+- `BlockFinalization`: Gestisce la finalizzazione dei blocchi.
+- `StateCommitment`: Gestisce il commitment degli stati.
+- `L2OutputOracle`: Fornisce un oracolo per gli output del Layer-2.
+- `FinalizationRBAC`: Implementa un sistema di controllo degli accessi basato sui ruoli.
 
 ### Bridge
 
-Il Bridge gestisce il trasferimento di asset tra Layer-1 (Solana) e Layer-2. Supporta depositi e prelievi di token.
+Il Bridge consente il trasferimento sicuro di asset tra Ethereum (L1) e Solana Layer-2. Implementa meccanismi di sicurezza avanzati per prevenire frodi e garantire l'integrità dei trasferimenti.
 
-**File principali**:
-- `src/bridge/mod.rs`: Modulo principale del Bridge
-- `src/bridge/deposit_handler.rs`: Gestione dei depositi
-- `src/bridge/withdrawal_handler.rs`: Gestione dei prelievi
-
-### Interfacce Standardizzate
-
-Le interfacce standardizzate garantiscono la coerenza e l'interoperabilità tra i componenti del sistema.
-
-**File principali**:
-- `src/interfaces/component_interface.rs`: Interfacce generiche per tutti i componenti
-- `src/interfaces/fraud_proof_interface.rs`: Interfacce specifiche per il sistema di Fraud Proof
-- `src/interfaces/finalization_interface.rs`: Interfacce specifiche per il sistema di Finalizzazione
-- `src/interfaces/bridge_interface.rs`: Interfacce specifiche per il Bridge
-
-### Gestione degli Errori
-
-La gestione degli errori fornisce meccanismi robusti per la gestione degli errori e il ripristino.
-
-**File principali**:
-- `src/error_handling/error_types.rs`: Tipi di errore standard
-- `src/error_handling/error_handler.rs`: Gestione degli errori e meccanismi di ripristino
+Componenti principali:
+- `BridgeManager`: Coordina le operazioni del bridge.
+- `DepositHandler`: Gestisce i depositi da L1 a L2.
+- `WithdrawalHandler`: Gestisce i prelievi da L2 a L1.
+- `TokenRegistry`: Mantiene un registro dei token supportati.
+- `SecurityModule`: Implementa controlli di sicurezza per le operazioni del bridge.
+- `MessageRelay`: Gestisce la comunicazione tra L1 e L2.
+- `BridgeRBAC`: Implementa un sistema di controllo degli accessi basato sui ruoli.
 
 ## Flusso di Esecuzione
 
 1. **Deposito di Asset**:
-   - Un utente deposita asset su Layer-1
-   - Il Bridge rileva il deposito e crea un asset corrispondente su Layer-2
+   - Un utente deposita asset su Ethereum (L1).
+   - Il `DepositHandler` rileva il deposito e lo elabora.
+   - Il `SecurityModule` verifica la validità del deposito.
+   - Se approvato, gli asset vengono coniati su Solana Layer-2.
 
 2. **Esecuzione di Transazioni**:
-   - Le transazioni vengono eseguite su Layer-2
-   - I risultati delle transazioni vengono pubblicati su Layer-1
+   - Le transazioni vengono eseguite sulla Solana Layer-2.
+   - I blocchi vengono proposti con le nuove transazioni.
+   - Il `StateTransition` calcola il nuovo stato.
 
-3. **Verifica e Contestazione**:
-   - Chiunque può verificare la validità delle transazioni
-   - Se viene rilevata una transazione invalida, può essere contestata tramite un fraud proof
+3. **Finalizzazione**:
+   - I blocchi proposti entrano in un periodo di challenge.
+   - Durante questo periodo, chiunque può contestare un blocco con una prova di frode.
+   - Se una contestazione è valida, il blocco viene invalidato.
+   - Se non ci sono contestazioni valide entro il periodo di challenge, il blocco viene finalizzato.
 
-4. **Finalizzazione**:
-   - Dopo un periodo di contestazione, i blocchi vengono finalizzati
-   - Gli stati finalizzati vengono committati su Layer-1
-
-5. **Prelievo di Asset**:
-   - Un utente può prelevare asset da Layer-2 a Layer-1
-   - Il Bridge verifica la validità del prelievo e rilascia gli asset su Layer-1
-
-## Configurazione e Utilizzo
-
-### Requisiti di Sistema
-
-- Solana CLI
-- Rust 1.60 o superiore
-- Node.js 14 o superiore
-
-### Installazione
-
-```bash
-# Clona il repository
-git clone https://github.com/buybotsolana/LAYER-2-COMPLETE.git
-cd LAYER-2-COMPLETE
-
-# Installa le dipendenze
-cargo build --release
-npm install
-```
-
-### Configurazione
-
-1. Configura il nodo Solana:
-```bash
-solana config set --url https://api.mainnet-beta.solana.com
-```
-
-2. Configura il Layer-2:
-```bash
-./setup_layer2.sh
-```
-
-### Esecuzione
-
-1. Avvia il nodo Layer-2:
-```bash
-./start_layer2.sh
-```
-
-2. Interagisci con il Layer-2:
-```bash
-./layer2_cli.sh deposit --amount 1 --token SOL
-./layer2_cli.sh transfer --to <ADDRESS> --amount 0.5 --token SOL
-./layer2_cli.sh withdraw --amount 0.5 --token SOL
-```
-
-## Test
-
-### Test Unitari
-
-```bash
-cargo test
-```
-
-### Test di Integrazione
-
-```bash
-cargo test --test integration_test
-```
-
-### Test di Stress
-
-```bash
-./stress_test.sh
-```
+4. **Prelievo di Asset**:
+   - Un utente inizia un prelievo su Solana Layer-2.
+   - Il `WithdrawalHandler` elabora il prelievo.
+   - Il `SecurityModule` verifica la validità del prelievo.
+   - Se approvato, gli asset vengono sbloccati su Ethereum (L1).
 
 ## Sicurezza
 
 Il sistema implementa diverse misure di sicurezza:
 
-1. **Fraud Proof**: Consente di contestare transazioni invalide
-2. **Periodo di Contestazione**: Fornisce tempo sufficiente per verificare le transazioni
-3. **Gestione degli Errori**: Implementa meccanismi robusti per la gestione degli errori
-4. **Autorizzazioni**: Verifica le autorizzazioni per operazioni critiche
+1. **Prove di Frode**: Consentono di contestare transazioni invalide.
+2. **Periodo di Challenge**: Fornisce tempo sufficiente per rilevare e contestare frodi.
+3. **Controllo degli Accessi Basato sui Ruoli**: Limita le operazioni sensibili a ruoli autorizzati.
+4. **Modulo di Sicurezza**: Implementa controlli di sicurezza avanzati per le operazioni del bridge.
+5. **Limiti Giornalieri**: Limita il volume di depositi e prelievi per token.
+6. **Rilevamento di Pattern Sospetti**: Identifica comportamenti potenzialmente fraudolenti.
 
-## Limitazioni Attuali
+## Configurazione
 
-1. Supporto limitato per token non nativi
-2. Latenza di finalizzazione dovuta al periodo di contestazione
-3. Dipendenza dalla disponibilità di Layer-1
+Il sistema è altamente configurabile:
 
-## Roadmap Futura
+1. **Periodo di Challenge**: Configurabile in base alle esigenze di sicurezza.
+2. **Livello di Sicurezza**: Può essere impostato su Low, Medium, High o Maximum.
+3. **Limiti di Deposito e Prelievo**: Configurabili per token.
+4. **Ruoli**: Configurabili per controllo degli accessi granulare.
 
-1. Supporto per smart contract più complessi
-2. Miglioramento delle prestazioni
-3. Integrazione con altri ecosistemi
-4. Implementazione di ZK-rollup per ridurre la latenza di finalizzazione
+## Test
 
-## Contribuire
+Il sistema include test completi:
 
-Le contribuzioni sono benvenute! Per contribuire:
+1. **Test Unitari**: Testano singoli componenti in isolamento.
+2. **Test di Integrazione**: Testano l'interazione tra componenti.
+3. **Test End-to-End**: Testano il sistema completo in scenari realistici.
+4. **Test di Stress**: Testano il sistema sotto carico.
+5. **Test su Blockchain Reale**: Testano il sistema su una blockchain reale.
 
-1. Forka il repository
-2. Crea un branch per la tua feature
-3. Commita le tue modifiche
-4. Invia una pull request
+## Sviluppi Futuri
 
-## Licenza
+Possibili sviluppi futuri includono:
 
-Questo progetto è rilasciato sotto licenza MIT.
+1. **Supporto per Smart Contract**: Aggiungere supporto per l'esecuzione di smart contract.
+2. **Miglioramenti di Prestazioni**: Ottimizzare le prestazioni del sistema.
+3. **Supporto per Altri Token**: Aggiungere supporto per più token.
+4. **Integrazione con Altri Sistemi**: Integrare con altri sistemi DeFi.
+5. **Miglioramenti di Sicurezza**: Implementare ulteriori misure di sicurezza.
+
+## Conclusione
+
+Questo Layer-2 su Solana fornisce una soluzione scalabile, sicura e interoperabile per l'ecosistema blockchain. Implementa meccanismi avanzati di sicurezza e offre un'architettura flessibile e configurabile.
