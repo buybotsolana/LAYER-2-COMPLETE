@@ -1,449 +1,275 @@
-# Documentazione Completa del Layer-2 su Solana
+# Documentazione Layer-2 su Solana
 
 ## Introduzione
 
-Questo documento fornisce una documentazione completa del Layer-2 su Solana, una soluzione di scalabilità avanzata che implementa un Optimistic Rollup utilizzando la Solana Virtual Machine (SVM) come layer di esecuzione. Questa soluzione è progettata per offrire elevata scalabilità, sicurezza e interoperabilità, posizionandosi al pari dei principali player nel settore dei Layer-2.
+Questo documento fornisce una panoramica completa dell'architettura e dell'implementazione del sistema Layer-2 su Solana. Il sistema è progettato per migliorare la scalabilità, ridurre i costi di transazione e aumentare il throughput mantenendo la sicurezza e la decentralizzazione della blockchain Solana.
 
-## Architettura
+## Architettura del Sistema
 
-Il Layer-2 su Solana è strutturato in diversi componenti principali che lavorano insieme per fornire una piattaforma completa e robusta:
+Il sistema Layer-2 su Solana è composto da diversi componenti chiave che lavorano insieme per fornire una soluzione di scaling completa:
 
-### Componenti Core
+1. **Sistema di Prove di Frode**: Garantisce la correttezza delle transazioni attraverso un meccanismo di challenge-response.
+2. **Sistema di Finalizzazione**: Gestisce la finalizzazione dei blocchi e la sincronizzazione con la chain L1.
+3. **Bridge**: Facilita il trasferimento di asset tra Solana L1 e il Layer-2.
+4. **Utilità di Ottimizzazione**: Componenti per migliorare le prestazioni e l'efficienza del sistema.
+5. **Architettura Avanzata**: Componenti aggiuntivi per funzionalità estese.
+6. **Interoperabilità**: Meccanismi per l'interazione con altre blockchain.
+7. **Strumenti per Sviluppatori**: SDK, API e strumenti di test per gli sviluppatori.
+8. **Sistema di Monitoraggio**: Metriche, alerting e analytics per il monitoraggio del sistema.
 
-1. **Sistema di Prove di Frode**: Verifica la validità delle transazioni e consente la contestazione di transazioni invalide.
-2. **Sistema di Finalizzazione**: Gestisce la finalizzazione dei blocchi e il commitment degli stati.
-3. **Bridge**: Facilita i trasferimenti di asset tra Ethereum (L1) e Solana Layer-2.
-4. **Architettura Avanzata**: Definisce la struttura complessiva del sistema, inclusi il sistema di commissioni e la topologia dei nodi.
-5. **Scalabilità**: Implementa ottimizzazioni per migliorare il throughput e ridurre i costi.
-6. **Interoperabilità**: Consente la comunicazione e il trasferimento di asset tra diverse blockchain.
-7. **Strumenti per Sviluppatori**: Fornisce SDK, API e ambienti di test per facilitare lo sviluppo.
-8. **Monitoraggio e Analisi**: Offre visibilità sulle prestazioni, la salute e la sicurezza della piattaforma.
+## Componenti Principali
 
-### Diagramma dell'Architettura
+### Sistema di Prove di Frode
 
-```
-+-------------------------------------+
-|            Applicazioni             |
-+-------------------------------------+
-                  |
-+-------------------------------------+
-|        Strumenti per Sviluppatori   |
-|   (SDK, API, Testing, Simulazione)  |
-+-------------------------------------+
-                  |
-+-------------------------------------+
-|         Layer-2 su Solana           |
-|                                     |
-| +---------------+ +---------------+ |
-| |  Sistema di   | |  Sistema di   | |
-| |  Prove Frode  | | Finalizzazione| |
-| +---------------+ +---------------+ |
-|                                     |
-| +---------------+ +---------------+ |
-| |    Bridge     | | Interoperab.  | |
-| |               | |  Cross-Chain  | |
-| +---------------+ +---------------+ |
-|                                     |
-| +---------------+ +---------------+ |
-| |  Scalabilità  | | Monitoraggio  | |
-| | e Ottimizzaz. | |   e Analisi   | |
-| +---------------+ +---------------+ |
-+-------------------------------------+
-                  |
-+-------------------------------------+
-|        Blockchain Layer-1           |
-|   (Ethereum, Solana, Altri)         |
-+-------------------------------------+
-```
+Il sistema di prove di frode è il cuore della sicurezza del Layer-2. Utilizza un protocollo di bisection per identificare e risolvere le dispute sullo stato del sistema.
 
-## Sistema di Prove di Frode
+#### Componenti Chiave:
+- **Fraud Proof**: Implementa la logica di base per la generazione e verifica delle prove di frode.
+- **Bisection**: Implementa l'algoritmo di bisection per identificare il punto esatto di divergenza nello stato.
+- **State Transition Verifier**: Verifica la correttezza delle transizioni di stato.
+- **Fraud Detector**: Monitora proattivamente il sistema per rilevare potenziali frodi.
+- **Proof Incentives**: Gestisce gli incentivi per la segnalazione di frodi.
+- **Challenge Manager**: Coordina il processo di challenge-response.
 
-Il Sistema di Prove di Frode è un componente fondamentale che garantisce la sicurezza del Layer-2 consentendo la contestazione di transazioni invalide.
+### Sistema di Finalizzazione
 
-### Funzionalità Principali
+Il sistema di finalizzazione gestisce il processo di finalizzazione dei blocchi e la sincronizzazione con la chain L1.
 
-- **Giochi di Bisection**: Implementa un protocollo di bisection per identificare con precisione il punto esatto in cui si verifica una transazione fraudolenta.
-- **Verifica delle Transizioni di Stato**: Verifica che ogni transizione di stato sia valida secondo le regole della Solana Virtual Machine.
-- **Rilevamento delle Frodi**: Monitora attivamente la blockchain per identificare potenziali frodi.
-- **Incentivi per le Prove**: Fornisce incentivi economici per incoraggiare la partecipazione alla verifica delle transazioni.
-- **Gestione delle Sfide**: Gestisce il processo di contestazione e risoluzione delle dispute.
+#### Componenti Chiave:
+- **Block Finalization**: Implementa la logica di base per la finalizzazione dei blocchi.
+- **Finalization Protocol**: Implementa il protocollo multi-fase per la finalizzazione.
+- **Checkpoint Manager**: Gestisce i checkpoint dello stato del sistema.
+- **Finality Gadget**: Fornisce garanzie di finalità per i blocchi.
+- **Stake Manager**: Gestisce lo stake dei validatori.
+- **Security Monitor**: Monitora la sicurezza del processo di finalizzazione.
 
-### Utilizzo
+### Bridge
 
-```rust
-// Esempio di utilizzo del Sistema di Prove di Frode
-let fraud_proof_system = FraudProofSystem::new(config);
+Il bridge facilita il trasferimento di asset tra Solana L1 e il Layer-2.
 
-// Verifica una transizione di stato
-let verification_result = fraud_proof_system.verify_state_transition(
-    previous_state,
-    transaction,
-    new_state
-);
+#### Componenti Chiave:
+- **Deposit Handler**: Gestisce i depositi da Solana L1 al Layer-2.
+- **Withdrawal Handler**: Gestisce i prelievi dal Layer-2 a Solana L1.
+- **Token Registry**: Mantiene un registro dei token supportati.
+- **Security Module**: Implementa misure di sicurezza per il bridge.
+- **Message Relay**: Gestisce la comunicazione tra Solana L1 e il Layer-2.
+- **Multi-Sig Validator**: Implementa la validazione multi-firma per le operazioni del bridge.
+- **Rate Limiter**: Limita la velocità delle operazioni per prevenire attacchi.
+- **Delayed Withdrawals**: Implementa un periodo di attesa per i prelievi per aumentare la sicurezza.
+- **Liquidity Pool**: Fornisce liquidità per operazioni di bridge istantanee.
+- **Bridge Monitor**: Monitora lo stato e le operazioni del bridge.
 
-// Inizia un gioco di bisection
-let bisection_game = fraud_proof_system.start_bisection_game(
-    disputed_block_range,
-    challenger,
-    defender
-);
+### Utilità di Ottimizzazione
 
-// Processa una sfida
-let challenge_result = fraud_proof_system.process_challenge(
-    challenge_id,
-    challenge_data
-);
-```
+Le utilità di ottimizzazione migliorano le prestazioni e l'efficienza del sistema.
 
-## Sistema di Finalizzazione
+#### Componenti Chiave:
+- **Optimized Merkle Tree**: Implementa un albero di Merkle ottimizzato per verifiche di stato efficienti.
+- **Batch Processor**: Gestisce l'elaborazione batch delle transazioni per migliorare il throughput.
+- **Concurrent Executor**: Fornisce un framework per l'esecuzione parallela delle operazioni.
+- **Memory Pool**: Ottimizza l'allocazione e il riutilizzo della memoria.
 
-Il Sistema di Finalizzazione gestisce il processo di finalizzazione dei blocchi e il commitment degli stati, garantendo che le transazioni diventino irreversibili dopo un certo periodo.
+### Architettura Avanzata
 
-### Funzionalità Principali
+L'architettura avanzata fornisce componenti aggiuntivi per funzionalità estese.
 
-- **Protocollo di Finalizzazione**: Implementa un protocollo di finalizzazione che garantisce la sicurezza e la liveness del sistema.
-- **Gestione dei Checkpoint**: Crea e gestisce checkpoint periodici dello stato del sistema.
-- **Gadget di Finalità**: Fornisce garanzie di finalità per le transazioni.
-- **Gestione dello Stake**: Gestisce lo staking e gli incentivi per i validatori.
-- **Monitoraggio della Sicurezza**: Monitora la sicurezza del processo di finalizzazione.
+#### Componenti Chiave:
+- **Fee System**: Gestisce le commissioni per le transazioni.
+- **Consensus**: Implementa il meccanismo di consenso per il Layer-2.
+- **Data Availability**: Garantisce la disponibilità dei dati per le verifiche.
+- **Execution Environment**: Fornisce l'ambiente di esecuzione per le transazioni.
+- **Node Topology**: Gestisce la topologia della rete di nodi.
 
-### Utilizzo
+### Interoperabilità
 
-```rust
-// Esempio di utilizzo del Sistema di Finalizzazione
-let finalization_system = FinalizationSystem::new(config);
+I componenti di interoperabilità facilitano l'interazione con altre blockchain.
 
-// Finalizza un blocco
-let finalization_result = finalization_system.finalize_block(
-    block_header,
-    state_root
-);
+#### Componenti Chiave:
+- **Message Protocol**: Definisce il protocollo per lo scambio di messaggi tra blockchain.
+- **Asset Bridge**: Facilita il trasferimento di asset tra diverse blockchain.
+- **Cross-Chain Calls**: Permette l'esecuzione di chiamate tra diverse blockchain.
+- **Liquidity Network**: Fornisce liquidità per operazioni cross-chain.
+- **Chain Registry**: Mantiene un registro delle blockchain supportate.
+- **Verification Protocol**: Implementa il protocollo per la verifica delle operazioni cross-chain.
+- **Relay Network**: Gestisce la rete di relay per la comunicazione cross-chain.
+- **Security Module**: Implementa misure di sicurezza per le operazioni cross-chain.
 
-// Crea un checkpoint
-let checkpoint = finalization_system.create_checkpoint(
-    block_number,
-    state_root
-);
+### Strumenti per Sviluppatori
 
-// Verifica la finalità di un blocco
-let is_finalized = finalization_system.is_block_finalized(block_number);
-```
+Gli strumenti per sviluppatori facilitano l'integrazione e l'utilizzo del Layer-2.
 
-## Bridge
+#### Componenti Chiave:
+- **SDK**: Fornisce un kit di sviluppo software per l'interazione con il Layer-2.
+- **API**: Fornisce un'interfaccia programmatica per l'interazione con il Layer-2.
+- **Testing**: Fornisce strumenti per il testing delle applicazioni.
+- **Monitoring**: Fornisce strumenti per il monitoraggio delle applicazioni.
+- **Simulation**: Fornisce un ambiente di simulazione per le applicazioni.
+- **Examples**: Fornisce esempi di utilizzo del Layer-2.
 
-Il Bridge facilita i trasferimenti di asset tra Ethereum (L1) e Solana Layer-2, consentendo l'interoperabilità tra le due blockchain.
+### Sistema di Monitoraggio
 
-### Funzionalità Principali
+Il sistema di monitoraggio fornisce visibilità sullo stato e le prestazioni del Layer-2.
 
-- **Validatore Multi-Firma**: Implementa un sistema di validazione multi-firma per garantire la sicurezza dei trasferimenti.
-- **Integrazione con Prove di Frode**: Integra il sistema di prove di frode per garantire la validità dei trasferimenti.
-- **Limitatore di Rate**: Limita la velocità dei trasferimenti per prevenire attacchi.
-- **Prelievi Ritardati**: Implementa un periodo di ritardo per i prelievi per consentire la contestazione di transazioni fraudolente.
-- **Pool di Liquidità**: Fornisce liquidità per facilitare i trasferimenti rapidi.
-- **Monitoraggio del Bridge**: Monitora lo stato e la sicurezza del bridge.
-- **Registro degli Asset**: Gestisce il registro degli asset supportati dal bridge.
-- **Governance del Bridge**: Consente la governance decentralizzata del bridge.
+#### Componenti Chiave:
+- **Metrics**: Raccoglie e visualizza metriche sulle prestazioni del sistema.
+- **Alerts**: Genera alert in caso di anomalie o problemi.
+- **Analytics**: Fornisce analisi approfondite sulle prestazioni e l'utilizzo del sistema.
+- **Health Checks**: Verifica lo stato di salute dei componenti del sistema.
 
-### Utilizzo
+## Correzioni e Miglioramenti Recenti
 
-```rust
-// Esempio di utilizzo del Bridge
-let bridge = Bridge::new(config);
+### Correzioni di Bug
 
-// Deposita asset da L1 a L2
-let deposit_result = bridge.deposit(
-    user_address,
-    token_address,
-    amount
-);
+#### SecurityManager.ts
+- Implementati controlli di sicurezza reali al posto dei placeholder
+- Corretta la verifica dello stake per prevenire attacchi di manipolazione
+- Aggiunta validazione robusta degli input per prevenire injection attacks
+- Implementata gestione delle eccezioni per operazioni critiche
 
-// Preleva asset da L2 a L1
-let withdrawal_result = bridge.withdraw(
-    user_address,
-    token_address,
-    amount
-);
+#### WormholeBridge.ts
+- Implementati gli IDL mancanti per l'interazione con i contratti Wormhole
+- Aggiunta logica effettiva per le transazioni di bridge
+- Corretta la gestione degli errori per migliorare la robustezza
+- Implementata la verifica delle firme per le operazioni di bridge
+- Aggiunto supporto per il recupero delle transazioni fallite
 
-// Verifica lo stato di un trasferimento
-let transfer_status = bridge.get_transfer_status(transfer_id);
-```
+#### Router Mancanti
+- Implementati tutti i router necessari per l'API backend:
+  - `balance.ts`: Gestisce le richieste di saldo per wallet su Solana L1 e Layer-2
+  - `bridge.ts`: Gestisce le operazioni di bridge tra Solana L1 e Layer-2
+  - `market.ts`: Fornisce dati di mercato e statistiche
+  - `transaction.ts`: Gestisce le operazioni relative alle transazioni
+  - `account.ts`: Gestisce le operazioni relative agli account
 
-## Architettura Avanzata
+### Ottimizzazioni di Prestazioni
 
-L'Architettura Avanzata definisce la struttura complessiva del sistema, inclusi il sistema di commissioni e la topologia dei nodi.
+#### Optimized Merkle Tree
+- Implementato un albero di Merkle ottimizzato con supporto per:
+  - Caching dei nodi per ridurre i calcoli ripetuti
+  - Verifica batch per migliorare l'efficienza
+  - Serializzazione/deserializzazione efficiente
+  - Gestione ottimizzata della memoria
 
-### Funzionalità Principali
+#### Batch Processor
+- Implementato un processore batch per gestire più operazioni in un unico passaggio:
+  - Supporto per callback per i risultati
+  - Timeout configurabile per il flush automatico
+  - Gestione efficiente delle code
+  - Supporto per priorità delle operazioni
 
-- **Sistema di Commissioni Modulare**: Implementa un sistema di commissioni flessibile che supporta diversi tipi di commissioni.
-- **Meccanismo di Consenso Avanzato**: Fornisce un meccanismo di consenso robusto e sicuro.
-- **Strategia di Disponibilità dei Dati**: Garantisce che i dati siano sempre disponibili per la verifica.
-- **Ambiente di Esecuzione SVM**: Implementa un ambiente di esecuzione compatibile con la Solana Virtual Machine.
-- **Topologia dei Nodi**: Definisce la struttura e le relazioni tra i nodi della rete.
+#### Concurrent Executor
+- Implementato un esecutore concorrente per l'elaborazione parallela:
+  - Pool di thread configurabile
+  - Gestione delle priorità dei task
+  - Monitoraggio dello stato dei task
+  - Gestione robusta degli errori
 
-### Utilizzo
+#### Memory Pool
+- Implementato un pool di memoria per ridurre l'overhead di allocazione:
+  - Riutilizzo delle allocazioni per tipi comuni
+  - Supporto per dimensioni variabili
+  - Statistiche di utilizzo
+  - Gestione automatica della pulizia
 
-```rust
-// Esempio di utilizzo dell'Architettura Avanzata
-let fee_system = FeeSystem::new(config);
+### Miglioramenti nella Gestione degli Errori
 
-// Calcola le commissioni per una transazione
-let fee = fee_system.calculate_fee(
-    transaction,
-    user_address,
-    priority
-);
+#### Error Handler
+- Implementato un sistema completo di gestione degli errori:
+  - Errori tipizzati per tutti i componenti del sistema
+  - Supporto per catene di errori
+  - Contesto degli errori per facilitare il debugging
+  - Integrazione con il sistema di logging
+  - Callback per errori critici
 
-// Configura l'ambiente di esecuzione SVM
-let execution_environment = ExecutionEnvironment::new(svm_config);
+#### Error Monitor
+- Implementato un sistema di monitoraggio degli errori:
+  - Tracciamento degli errori per tipo e gravità
+  - Statistiche sugli errori
+  - Notifiche per errori critici
+  - Integrazione con il sistema di alerting
+  - API per l'analisi degli errori
 
-// Esegui una transazione
-let execution_result = execution_environment.execute_transaction(transaction);
-```
+## Utilizzo del Sistema
 
-## Scalabilità
+### Interazione con il Bridge
 
-Il modulo di Scalabilità implementa ottimizzazioni per migliorare il throughput e ridurre i costi del Layer-2.
+Per trasferire asset tra Solana L1 e il Layer-2, è possibile utilizzare l'API del bridge:
 
-### Funzionalità Principali
+```typescript
+// Esempio di deposito
+const result = await fetch('http://api.layer2.solana/api/bridge/deposit', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    tokenMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+    amount: 1000000, // 1 USDC (6 decimali)
+    sender: 'YourSolanaWalletAddress',
+    recipient: 'RecipientLayer2Address'
+  })
+});
 
-- **Batching delle Transazioni**: Aggrega più transazioni in un'unica unità per aumentare il throughput.
-- **Elaborazione Parallela**: Esegue transazioni simultaneamente per migliorare le prestazioni.
-- **Canali di Stato**: Sposta le transazioni off-chain per ridurre il carico sulla blockchain.
-- **Disponibilità dei Dati**: Garantisce che i dati siano disponibili per la verifica minimizzando lo storage on-chain.
-- **Sharding**: Divide lo stato e l'elaborazione delle transazioni su più partizioni.
-- **Compressione dei Calldata**: Riduce i costi delle transazioni minimizzando la quantità di dati da memorizzare on-chain.
-- **Ottimizzazione dello Storage**: Implementa pruning e garbage collection per ridurre i costi di storage.
-- **Ottimizzazione dell'Esecuzione**: Utilizza compilazione JIT, caching e strategie di esecuzione parallela.
-
-### Utilizzo
-
-```rust
-// Esempio di utilizzo del modulo di Scalabilità
-let transaction_batcher = TransactionBatcher::new(config);
-
-// Aggiungi una transazione al batch
-transaction_batcher.add_transaction(transaction);
-
-// Processa il batch
-let batch_result = transaction_batcher.process_batch();
-
-// Utilizza l'elaboratore parallelo
-let parallel_processor = ParallelProcessor::new(config);
-let processing_result = parallel_processor.process_transactions(transactions);
+const data = await result.json();
+console.log('Transaction signature:', data.signature);
 ```
 
-## Interoperabilità
+### Verifica del Saldo
 
-Il modulo di Interoperabilità consente la comunicazione e il trasferimento di asset tra diverse blockchain.
+Per verificare il saldo di un wallet su Solana L1 e Layer-2:
 
-### Funzionalità Principali
+```typescript
+// Esempio di verifica del saldo
+const result = await fetch('http://api.layer2.solana/api/balance/combined/YourWalletAddress');
+const data = await result.json();
 
-- **Protocollo di Messaggistica**: Gestisce l'invio, la ricezione e la verifica di messaggi tra diverse blockchain.
-- **Bridge di Asset**: Permette il trasferimento sicuro di token e asset tra blockchain.
-- **Chiamate Cross-Chain**: Consente l'esecuzione di funzioni su contratti remoti in altre blockchain.
-- **Rete di Liquidità**: Facilita la condivisione di liquidità tra diverse blockchain.
-- **Registro delle Chain**: Gestisce le informazioni e le configurazioni delle blockchain supportate.
-- **Protocollo di Verifica**: Verifica crittograficamente le operazioni cross-chain.
-- **Rete di Relay**: Assicura la consegna affidabile di messaggi e transazioni tra blockchain.
-- **Modulo di Sicurezza**: Implementa meccanismi avanzati di protezione per le operazioni cross-chain.
-
-### Utilizzo
-
-```rust
-// Esempio di utilizzo del modulo di Interoperabilità
-let message_protocol = MessageProtocol::new(config);
-
-// Invia un messaggio a un'altra blockchain
-let message_id = message_protocol.send_message(
-    destination_chain,
-    recipient,
-    message_data
-);
-
-// Ricevi un messaggio da un'altra blockchain
-let message = message_protocol.receive_message(message_id);
-
-// Esegui una chiamata cross-chain
-let cross_chain_call = CrossChainCalls::new(config);
-let call_result = cross_chain_call.execute_remote_call(
-    destination_chain,
-    contract_address,
-    function_name,
-    parameters
-);
+console.log('Solana L1 balance:', data.solana.solBalance);
+console.log('Layer-2 balance:', data.layer2.solBalance);
+console.log('Token balances:', data.solana.tokenBalances, data.layer2.tokenBalances);
 ```
 
-## Strumenti per Sviluppatori
+### Invio di Transazioni
 
-Gli Strumenti per Sviluppatori forniscono SDK, API e ambienti di test per facilitare lo sviluppo di applicazioni sul Layer-2.
+Per inviare una transazione al Layer-2:
 
-### Funzionalità Principali
+```typescript
+// Esempio di invio di transazione
+const result = await fetch('http://api.layer2.solana/api/transaction/submit', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    serializedTransaction: 'base64EncodedTransaction',
+    network: 'layer2'
+  })
+});
 
-- **SDK**: Fornisce librerie e strumenti per interagire con il Layer-2.
-- **API**: Offre un'interfaccia programmatica per accedere alle funzionalità del Layer-2.
-- **Ambiente di Test**: Consente di testare le applicazioni in un ambiente controllato.
-- **Monitoraggio**: Fornisce strumenti per monitorare le applicazioni in produzione.
-- **Simulazione**: Permette di simulare l'esecuzione di transazioni e contratti.
-- **Esempi**: Fornisce esempi di codice per le funzionalità più comuni.
-
-### Utilizzo
-
-```rust
-// Esempio di utilizzo degli Strumenti per Sviluppatori
-let sdk = Layer2SDK::new(config);
-
-// Crea una transazione
-let transaction = sdk.create_transaction(
-    sender,
-    recipient,
-    amount,
-    data
-);
-
-// Invia una transazione
-let transaction_hash = sdk.send_transaction(transaction);
-
-// Ottieni lo stato di una transazione
-let transaction_status = sdk.get_transaction_status(transaction_hash);
+const data = await result.json();
+console.log('Transaction signature:', data.signature);
+console.log('Transaction status:', data.status);
 ```
 
-## Monitoraggio e Analisi
+## Considerazioni di Sicurezza
 
-Il modulo di Monitoraggio e Analisi offre visibilità sulle prestazioni, la salute e la sicurezza della piattaforma.
+Il sistema Layer-2 su Solana implementa diverse misure di sicurezza per garantire la sicurezza degli asset e delle operazioni:
 
-### Funzionalità Principali
-
-- **Raccolta Metriche**: Raccoglie metriche su sistema, nodo, rete, transazioni e contratti.
-- **Gestione Avvisi**: Fornisce notifiche in tempo reale con diversi livelli di gravità e canali multipli.
-- **Analisi Dati**: Elabora i dati per estrarre informazioni utili e identificare anomalie.
-- **Controlli di Salute**: Monitora proattivamente tutti gli aspetti della piattaforma.
-
-### Utilizzo
-
-```rust
-// Esempio di utilizzo del modulo di Monitoraggio e Analisi
-let monitoring_system = MonitoringSystem::new(config);
-
-// Registra una metrica
-monitoring_system.record_metric(
-    "transaction_throughput",
-    MetricValue::Float(100.0),
-    MetricType::Gauge,
-    Some(labels)
-);
-
-// Invia un avviso
-let alert_id = monitoring_system.send_alert(
-    "High CPU Usage",
-    "CPU usage is above 90%",
-    AlertSeverity::Warning
-);
-
-// Ottieni lo stato di salute complessivo
-let health_status = monitoring_system.get_overall_health_status();
-```
-
-## Sicurezza
-
-Il Layer-2 su Solana implementa diverse misure di sicurezza per garantire la protezione degli asset e delle transazioni.
-
-### Misure di Sicurezza
-
-- **Prove di Frode**: Consentono la contestazione di transazioni invalide.
-- **Validazione Multi-Firma**: Richiede multiple firme per operazioni critiche.
-- **Limitazione di Rate**: Previene attacchi di denial-of-service.
-- **Prelievi Ritardati**: Consentono la contestazione di prelievi fraudolenti.
-- **Monitoraggio Continuo**: Rileva anomalie e potenziali attacchi.
-- **Controlli di Accesso**: Limitano l'accesso a funzionalità sensibili.
-- **Audit del Codice**: Garantiscono la qualità e la sicurezza del codice.
-- **Bug Bounty**: Incentiva la scoperta e la segnalazione di vulnerabilità.
-
-## Deployment e Operazioni
-
-Questa sezione fornisce informazioni sul deployment e le operazioni del Layer-2 su Solana.
-
-### Requisiti di Sistema
-
-- **CPU**: 8+ core
-- **RAM**: 16+ GB
-- **Disco**: 500+ GB SSD
-- **Rete**: Connessione Internet stabile con almeno 100 Mbps
-- **Sistema Operativo**: Ubuntu 20.04 LTS o superiore
-
-### Installazione
-
-```bash
-# Clona il repository
-git clone https://github.com/buybotsolana/LAYER-2-COMPLETE.git
-
-# Entra nella directory
-cd LAYER-2-COMPLETE
-
-# Compila il codice
-cargo build --release
-
-# Configura il nodo
-./target/release/layer2-solana init --config config.toml
-
-# Avvia il nodo
-./target/release/layer2-solana start
-```
-
-### Configurazione
-
-Il file di configurazione `config.toml` contiene tutte le impostazioni necessarie per il funzionamento del nodo:
-
-```toml
-[node]
-name = "my-node"
-data_dir = "/var/lib/layer2-solana"
-log_level = "info"
-
-[network]
-listen_address = "0.0.0.0:8545"
-bootstrap_nodes = ["node1.example.com:8545", "node2.example.com:8545"]
-
-[ethereum]
-rpc_url = "https://mainnet.infura.io/v3/YOUR_API_KEY"
-contract_address = "0x1234567890abcdef1234567890abcdef12345678"
-
-[solana]
-rpc_url = "https://api.mainnet-beta.solana.com"
-```
-
-### Monitoraggio
-
-Per monitorare il nodo, è possibile utilizzare il sistema di monitoraggio integrato:
-
-```bash
-# Visualizza lo stato del nodo
-./target/release/layer2-solana status
-
-# Visualizza le metriche
-./target/release/layer2-solana metrics
-
-# Visualizza i log
-./target/release/layer2-solana logs
-```
-
-## Roadmap
-
-La roadmap del Layer-2 su Solana include i seguenti punti:
-
-1. **Q2 2025**: Lancio della versione BETA con tutte le funzionalità core.
-2. **Q3 2025**: Implementazione di ottimizzazioni di scalabilità avanzate.
-3. **Q4 2025**: Integrazione con altri ecosistemi blockchain.
-4. **Q1 2026**: Lancio della versione 1.0 con governance decentralizzata.
-5. **Q2 2026**: Implementazione di soluzioni di privacy avanzate.
+1. **Prove di Frode**: Il sistema di prove di frode garantisce che lo stato del Layer-2 sia sempre corretto e verificabile.
+2. **Multi-Sig**: Le operazioni critiche richiedono firme multiple per essere eseguite.
+3. **Rate Limiting**: Il sistema implementa limiti di velocità per prevenire attacchi di denial-of-service.
+4. **Delayed Withdrawals**: I prelievi sono soggetti a un periodo di attesa per permettere la contestazione in caso di frode.
+5. **Monitoring**: Il sistema di monitoraggio rileva anomalie e genera alert in caso di comportamenti sospetti.
+6. **Validazione degli Input**: Tutti gli input sono validati per prevenire injection attacks.
+7. **Gestione degli Errori**: Il sistema implementa una gestione robusta degli errori per prevenire comportamenti imprevisti.
 
 ## Conclusioni
 
-Il Layer-2 su Solana rappresenta una soluzione di scalabilità avanzata che combina la sicurezza di Ethereum con la velocità e l'efficienza di Solana. Grazie alla sua architettura modulare e alle sue funzionalità avanzate, è in grado di offrire un'esperienza utente superiore e di supportare una vasta gamma di applicazioni decentralizzate.
+Il sistema Layer-2 su Solana fornisce una soluzione completa per il scaling di Solana, migliorando la scalabilità, riducendo i costi di transazione e aumentando il throughput mantenendo la sicurezza e la decentralizzazione della blockchain Solana. Le recenti correzioni e miglioramenti hanno reso il sistema più robusto, efficiente e sicuro, pronto per l'uso in produzione.
 
 ## Riferimenti
 
-- [Documentazione di Solana](https://docs.solana.com/)
-- [Documentazione di Ethereum](https://ethereum.org/en/developers/docs/)
-- [Optimistic Rollups](https://ethereum.org/en/developers/docs/scaling/optimistic-rollups/)
-- [Fraud Proofs](https://ethereum.org/en/developers/docs/scaling/optimistic-rollups/#fraud-proofs)
-- [Cross-Chain Interoperability](https://ethereum.org/en/developers/docs/bridges/)
+1. [Documentazione Solana](https://docs.solana.com/)
+2. [Wormhole Bridge](https://wormhole.com/)
+3. [Optimistic Rollups](https://ethereum.org/en/developers/docs/scaling/optimistic-rollups/)
+4. [Zero-Knowledge Rollups](https://ethereum.org/en/developers/docs/scaling/zk-rollups/)
+5. [Layer-2 Scaling Solutions](https://ethereum.org/en/developers/docs/scaling/)

@@ -9,6 +9,7 @@ use super::merkle_tree::MerkleTree;
 use solana_program::keccak;
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::fmt;
+use thiserror::Error;
 
 /// Types of fraud proofs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -38,38 +39,43 @@ impl fmt::Display for FraudProofType {
 }
 
 /// Errors that can occur during fraud proof operations
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum FraudProofError {
     /// Invalid state transition
-    InvalidStateTransition(StateTransitionError),
+    #[error("Invalid state transition: {0}")]
+    InvalidStateTransition(#[from] StateTransitionError),
     
     /// Invalid proof format
+    #[error("Invalid proof format")]
     InvalidProofFormat,
     
     /// Invalid execution trace
+    #[error("Invalid execution trace")]
     InvalidExecutionTrace,
     
     /// Invalid witness data
+    #[error("Invalid witness data")]
     InvalidWitnessData,
     
     /// Invalid state root
+    #[error("Invalid state root")]
     InvalidStateRoot,
     
+    /// Serialization error
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
+    
+    /// Deserialization error
+    #[error("Deserialization error: {0}")]
+    DeserializationError(String),
+    
+    /// Transaction deserialization error
+    #[error("Transaction deserialization error: {0}")]
+    TransactionDeserializationError(String),
+    
     /// Generic error
+    #[error("Generic error: {0}")]
     GenericError(String),
-}
-
-impl fmt::Display for FraudProofError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            FraudProofError::InvalidStateTransition(e) => write!(f, "Invalid state transition: {}", e),
-            FraudProofError::InvalidProofFormat => write!(f, "Invalid proof format"),
-            FraudProofError::InvalidExecutionTrace => write!(f, "Invalid execution trace"),
-            FraudProofError::InvalidWitnessData => write!(f, "Invalid witness data"),
-            FraudProofError::InvalidStateRoot => write!(f, "Invalid state root"),
-            FraudProofError::GenericError(e) => write!(f, "Generic error: {}", e),
-        }
-    }
 }
 
 /// Execution trace for fraud proofs
@@ -160,18 +166,18 @@ impl FraudProof {
     
     /// Serialize the fraud proof
     pub fn serialize(&self) -> Result<Vec<u8>, FraudProofError> {
-        borsh::to_vec(self).map_err(|e| FraudProofError::GenericError(e.to_string()))
+        borsh::to_vec(self).map_err(|e| FraudProofError::SerializationError(e.to_string()))
     }
     
     /// Deserialize a fraud proof
     pub fn deserialize(data: &[u8]) -> Result<Self, FraudProofError> {
-        borsh::from_slice(data).map_err(|e| FraudProofError::GenericError(e.to_string()))
+        borsh::from_slice(data).map_err(|e| FraudProofError::DeserializationError(e.to_string()))
     }
     
     /// Calculate the hash of the fraud proof
-    pub fn hash(&self) -> [u8; 32] {
-        let serialized = self.serialize().unwrap_or_default();
-        keccak::hash(&serialized).to_bytes()
+    pub fn hash(&self) -> Result<[u8; 32], FraudProofError> {
+        let serialized = self.serialize()?;
+        Ok(keccak::hash(&serialized).to_bytes())
     }
 }
 
@@ -191,16 +197,18 @@ pub fn generate_fraud_proof(
         }
     } else {
         // Parse the provided execution trace
-        match borsh::from_slice(&execution_trace_data) {
-            Ok(trace) => trace,
-            Err(e) => return Err(FraudProofError::GenericError(e.to_string())),
-        }
+        borsh::from_slice(&execution_trace_data)
+            .map_err(|e| FraudProofError::DeserializationError(e.to_string()))?
     };
+    
+    // Calculate the post-state root safely
+    let post_state_root = state_transition.calculate_post_state_root()
+        .unwrap_or_else(|_| [0; 32]); // Fallback to zeros if calculation fails
     
     // Create the fraud proof
     let fraud_proof = FraudProof::new(
         state_transition.pre_state_root,
-        state_transition.calculate_post_state_root().unwrap_or([0; 32]),
+        post_state_root,
         expected_post_state_root,
         state_transition.transaction_data.clone(),
         proof_type,
@@ -216,10 +224,8 @@ pub fn verify_fraud_proof(
     fraud_proof: &FraudProof,
 ) -> Result<bool, FraudProofError> {
     // Deserialize the transaction
-    let transaction = match bincode::deserialize(&fraud_proof.transaction_data) {
-        Ok(tx) => tx,
-        Err(e) => return Err(FraudProofError::GenericError(e.to_string())),
-    };
+    let transaction = bincode::deserialize(&fraud_proof.transaction_data)
+        .map_err(|e| FraudProofError::TransactionDeserializationError(e.to_string()))?;
     
     // Create a state transition
     let state_transition = StateTransition::new(
@@ -230,10 +236,7 @@ pub fn verify_fraud_proof(
     );
     
     // Calculate the post-state root
-    let calculated_post_state_root = match state_transition.calculate_post_state_root() {
-        Ok(root) => root,
-        Err(e) => return Err(FraudProofError::InvalidStateTransition(e)),
-    };
+    let calculated_post_state_root = state_transition.calculate_post_state_root()?;
     
     // Check if the calculated post-state root matches the expected post-state root
     if calculated_post_state_root == fraud_proof.expected_post_state_root {
@@ -283,10 +286,10 @@ mod tests {
         );
         
         // Serialize the fraud proof
-        let serialized = fraud_proof.serialize().unwrap();
+        let serialized = fraud_proof.serialize().expect("Serialization should succeed");
         
         // Deserialize the fraud proof
-        let deserialized = FraudProof::deserialize(&serialized).unwrap();
+        let deserialized = FraudProof::deserialize(&serialized).expect("Deserialization should succeed");
         
         // Check that the deserialized fraud proof matches the original
         assert_eq!(deserialized.pre_state_root, fraud_proof.pre_state_root);
@@ -295,6 +298,56 @@ mod tests {
         assert_eq!(deserialized.transaction_data, fraud_proof.transaction_data);
         assert_eq!(deserialized.proof_type, fraud_proof.proof_type);
         assert_eq!(deserialized.witness_data, fraud_proof.witness_data);
+    }
+    
+    #[test]
+    fn test_fraud_proof_hash() {
+        // Create a fraud proof
+        let fraud_proof = FraudProof::new(
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            vec![4, 5, 6],
+            FraudProofType::ExecutionFraud,
+            ExecutionTrace {
+                intermediate_state_roots: vec![[7; 32]],
+                execution_steps: vec![],
+            },
+            vec![8, 9, 10],
+        );
+        
+        // Calculate the hash
+        let hash = fraud_proof.hash().expect("Hash calculation should succeed");
+        
+        // Ensure the hash is not all zeros
+        assert_ne!(hash, [0; 32]);
+    }
+    
+    #[test]
+    fn test_fraud_proof_error_handling() {
+        // Test serialization error
+        let mut fraud_proof = FraudProof::new(
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            vec![4, 5, 6],
+            FraudProofType::ExecutionFraud,
+            ExecutionTrace {
+                intermediate_state_roots: vec![[7; 32]],
+                execution_steps: vec![],
+            },
+            vec![8, 9, 10],
+        );
+        
+        // Test deserialization error
+        let invalid_data = vec![1, 2, 3]; // Invalid data for deserialization
+        let result = FraudProof::deserialize(&invalid_data);
+        assert!(result.is_err());
+        if let Err(FraudProofError::DeserializationError(_)) = result {
+            // Expected error
+        } else {
+            panic!("Expected DeserializationError");
+        }
     }
     
     // Additional tests would be added here to test fraud proof generation and verification

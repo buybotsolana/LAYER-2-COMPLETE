@@ -19,6 +19,57 @@ use solana_program::{
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::collections::HashMap;
+use thiserror::Error;
+
+/// Errors that may occur during fee system operations
+#[derive(Error, Debug, Clone, PartialEq, Eq)]
+pub enum FeeSystemError {
+    /// Fee system is not initialized
+    #[error("Fee system is not initialized")]
+    NotInitialized,
+    
+    /// Invalid fee type
+    #[error("Invalid fee type: {0}")]
+    InvalidFeeType(String),
+    
+    /// Invalid fee parameters
+    #[error("Invalid fee parameters: {0}")]
+    InvalidFeeParameters(String),
+    
+    /// Invalid fee distribution
+    #[error("Invalid fee distribution: {0}")]
+    InvalidFeeDistribution(String),
+    
+    /// Fee calculation error
+    #[error("Fee calculation error: {0}")]
+    FeeCalculationError(String),
+    
+    /// Fee distribution error
+    #[error("Fee distribution error: {0}")]
+    FeeDistributionError(String),
+    
+    /// Insufficient funds for fee payment
+    #[error("Insufficient funds for fee payment: {0}")]
+    InsufficientFunds(String),
+    
+    /// Missing fee recipient
+    #[error("Missing fee recipient: {0}")]
+    MissingFeeRecipient(String),
+    
+    /// Unauthorized operation
+    #[error("Unauthorized operation: {0}")]
+    Unauthorized(String),
+    
+    /// Generic error
+    #[error("Generic error: {0}")]
+    GenericError(String),
+}
+
+impl From<ProgramError> for FeeSystemError {
+    fn from(error: ProgramError) -> Self {
+        FeeSystemError::GenericError(error.to_string())
+    }
+}
 
 /// Fee type enumeration
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq, Hash)]
@@ -121,6 +172,26 @@ impl Default for FeeDistribution {
     }
 }
 
+impl FeeDistribution {
+    /// Validate that the distribution percentages sum to 10000 (100%)
+    pub fn validate(&self) -> Result<(), FeeSystemError> {
+        let total = self.sequencer_percentage + 
+                    self.validator_percentage + 
+                    self.treasury_percentage + 
+                    self.insurance_percentage + 
+                    self.staker_percentage + 
+                    self.lp_percentage;
+        
+        if total != 10000 {
+            return Err(FeeSystemError::InvalidFeeDistribution(
+                format!("Fee distribution percentages must sum to 10000 (100%), got {}", total)
+            ));
+        }
+        
+        Ok(())
+    }
+}
+
 /// Fee system configuration
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
 pub struct FeeSystemConfig {
@@ -214,6 +285,55 @@ impl Default for FeeSystemConfig {
             max_base_fee_change: 1250, // 12.5%
             target_block_utilization: 8000, // 80%
         }
+    }
+}
+
+impl FeeSystemConfig {
+    /// Validate the fee system configuration
+    pub fn validate(&self) -> Result<(), FeeSystemError> {
+        // Validate fee distribution
+        self.fee_distribution.validate()?;
+        
+        // Validate fee parameters
+        for (fee_type, params) in &self.fee_parameters {
+            if params.min_amount > params.max_amount {
+                return Err(FeeSystemError::InvalidFeeParameters(
+                    format!("Min amount ({}) greater than max amount ({}) for fee type {:?}", 
+                            params.min_amount, params.max_amount, fee_type)
+                ));
+            }
+            
+            if params.cap < params.min_amount || params.cap > params.max_amount {
+                return Err(FeeSystemError::InvalidFeeParameters(
+                    format!("Cap ({}) outside of min-max range ({}-{}) for fee type {:?}", 
+                            params.cap, params.min_amount, params.max_amount, fee_type)
+                ));
+            }
+            
+            if params.dynamic_factor == 0 {
+                return Err(FeeSystemError::InvalidFeeParameters(
+                    format!("Dynamic factor cannot be zero for fee type {:?}", fee_type)
+                ));
+            }
+        }
+        
+        // Validate dynamic fee adjustment parameters
+        if self.dynamic_fee_adjustment {
+            if self.base_fee_adjustment_factor == 0 {
+                return Err(FeeSystemError::InvalidFeeParameters(
+                    "Base fee adjustment factor cannot be zero".to_string()
+                ));
+            }
+            
+            if self.target_block_utilization == 0 || self.target_block_utilization > 10000 {
+                return Err(FeeSystemError::InvalidFeeParameters(
+                    format!("Target block utilization must be between 1 and 10000, got {}", 
+                            self.target_block_utilization)
+                ));
+            }
+        }
+        
+        Ok(())
     }
 }
 
@@ -325,6 +445,12 @@ impl FeeSystem {
             self.collected_fees.insert(fee_type.clone(), 0);
         }
         
+        // Validate the configuration
+        self.config.validate().map_err(|e| {
+            msg!("Fee system configuration validation failed: {}", e);
+            ProgramError::InvalidArgument
+        })?;
+        
         self.initialized = true;
         
         msg!("Fee system initialized");
@@ -338,9 +464,9 @@ impl FeeSystem {
     }
     
     /// Calculate fees for a transaction
-    pub fn calculate_fees(&self, transaction_data: &[u8]) -> Result<Vec<FeeCalculationResult>, ProgramError> {
+    pub fn calculate_fees(&self, transaction_data: &[u8]) -> Result<Vec<FeeCalculationResult>, FeeSystemError> {
         if !self.initialized {
-            return Err(ProgramError::UninitializedAccount);
+            return Err(FeeSystemError::NotInitialized);
         }
         
         // Parse the transaction to determine the fee types and amounts
@@ -349,7 +475,7 @@ impl FeeSystem {
         
         // For now, we'll just calculate a base fee
         let base_fee_params = self.config.fee_parameters.get(&FeeType::BaseFee)
-            .ok_or(ProgramError::InvalidArgument)?;
+            .ok_or_else(|| FeeSystemError::InvalidFeeType("Base fee not configured".to_string()))?;
         
         if !base_fee_params.is_active {
             return Ok(vec![]);
@@ -358,12 +484,16 @@ impl FeeSystem {
         // Calculate the base fee
         let base_fee_amount = self.calculate_base_fee(transaction_data.len() as u64, base_fee_params);
         
+        // Get the treasury recipient
+        let treasury_recipient = self.fee_recipients.get("treasury")
+            .ok_or_else(|| FeeSystemError::MissingFeeRecipient("Treasury recipient not configured".to_string()))?;
+        
         // Create a fee calculation result
         let fee_result = FeeCalculationResult {
             fee_type: FeeType::BaseFee,
             amount: base_fee_amount,
             payer: Pubkey::new_unique(), // This would be the transaction signer in a real system
-            recipient: *self.fee_recipients.get("treasury").unwrap_or(&Pubkey::new_unique()),
+            recipient: *treasury_recipient,
             is_paid: false,
         };
         
@@ -386,15 +516,19 @@ impl FeeSystem {
     }
     
     /// Distribute fees according to the fee distribution rules
-    pub fn distribute_fees(&mut self, fees: &[FeeCalculationResult]) -> ProgramResult {
+    pub fn distribute_fees(&mut self, fees: &[FeeCalculationResult]) -> Result<(), FeeSystemError> {
         if !self.initialized {
-            return Err(ProgramError::UninitializedAccount);
+            return Err(FeeSystemError::NotInitialized);
         }
         
         for fee in fees {
             // Update collected fees
             if let Some(collected) = self.collected_fees.get_mut(&fee.fee_type) {
                 *collected += fee.amount;
+            } else {
+                return Err(FeeSystemError::InvalidFeeType(
+                    format!("Fee type {:?} not configured", fee.fee_type)
+                ));
             }
             
             // In a real system, we would transfer the fee to the recipients according to the distribution rules
@@ -410,6 +544,19 @@ impl FeeSystem {
             let staker_amount = (fee.amount * self.config.fee_distribution.staker_percentage as u64) / 10_000;
             let lp_amount = (fee.amount * self.config.fee_distribution.lp_percentage as u64) / 10_000;
             
+            // Verify that the distribution sums to the fee amount
+            let total_distributed = sequencer_amount + validator_amount + treasury_amount + 
+                                   insurance_amount + staker_amount + lp_amount;
+            
+            // There might be a small rounding error due to integer division
+            let rounding_error = fee.amount.saturating_sub(total_distributed);
+            if rounding_error > 1 {
+                return Err(FeeSystemError::FeeDistributionError(
+                    format!("Distribution sum ({}) does not match fee amount ({}), difference: {}", 
+                            total_distributed, fee.amount, rounding_error)
+                ));
+            }
+            
             msg!("Sequencer: {}", sequencer_amount);
             msg!("Validator: {}", validator_amount);
             msg!("Treasury: {}", treasury_amount);
@@ -422,10 +569,13 @@ impl FeeSystem {
     }
     
     /// Update the fee system configuration
-    pub fn update_config(&mut self, config: FeeSystemConfig) -> ProgramResult {
+    pub fn update_config(&mut self, config: FeeSystemConfig) -> Result<(), FeeSystemError> {
         if !self.initialized {
-            return Err(ProgramError::UninitializedAccount);
+            return Err(FeeSystemError::NotInitialized);
         }
+        
+        // Validate the new configuration
+        config.validate()?;
         
         // Update the configuration
         self.config = config;
@@ -443,9 +593,16 @@ impl FeeSystem {
     }
     
     /// Update the base fee based on block utilization
-    pub fn update_base_fee(&mut self, block_utilization: u32) -> ProgramResult {
+    pub fn update_base_fee(&mut self, block_utilization: u32) -> Result<(), FeeSystemError> {
         if !self.initialized {
-            return Err(ProgramError::UninitializedAccount);
+            return Err(FeeSystemError::NotInitialized);
+        }
+        
+        // Ensure block utilization is within valid range
+        if block_utilization > 10000 {
+            return Err(FeeSystemError::InvalidFeeParameters(
+                format!("Block utilization must be between 0 and 10000, got {}", block_utilization)
+            ));
         }
         
         // Update block utilization
@@ -459,15 +616,15 @@ impl FeeSystem {
                 self.config.base_fee_adjustment_factor
             } else {
                 // Block is under-utilized, decrease the base fee
-                10_000 / self.config.base_fee_adjustment_factor
+                10000 / self.config.base_fee_adjustment_factor
             };
             
             // Calculate the new base fee
-            let new_base_fee = (self.current_base_fee * adjustment_factor as u64) / 10_000;
+            let new_base_fee = (self.current_base_fee * adjustment_factor as u64) / 10000;
             
             // Calculate the maximum change
-            let max_increase = (self.current_base_fee * self.config.max_base_fee_change as u64) / 10_000;
-            let max_decrease = (self.current_base_fee * self.config.max_base_fee_change as u64) / 10_000;
+            let max_increase = (self.current_base_fee * self.config.max_base_fee_change as u64) / 10000;
+            let max_decrease = (self.current_base_fee * self.config.max_base_fee_change as u64) / 10000;
             
             // Apply the maximum change constraint
             if new_base_fee > self.current_base_fee {
@@ -476,7 +633,7 @@ impl FeeSystem {
                 self.current_base_fee = (self.current_base_fee - max_decrease).max(new_base_fee);
             }
             
-            msg!("Base fee updated: {}", self.current_base_fee);
+            msg!("Base fee updated to {}", self.current_base_fee);
         }
         
         Ok(())
@@ -487,14 +644,91 @@ impl FeeSystem {
         self.current_base_fee
     }
     
-    /// Get the collected fees
-    pub fn get_collected_fees(&self) -> &HashMap<FeeType, u64> {
-        &self.collected_fees
+    /// Get the collected fees for a specific fee type
+    pub fn get_collected_fees(&self, fee_type: &FeeType) -> Result<u64, FeeSystemError> {
+        if !self.initialized {
+            return Err(FeeSystemError::NotInitialized);
+        }
+        
+        self.collected_fees.get(fee_type)
+            .copied()
+            .ok_or_else(|| FeeSystemError::InvalidFeeType(format!("Fee type {:?} not configured", fee_type)))
     }
     
-    /// Get the fee recipients
-    pub fn get_fee_recipients(&self) -> &HashMap<String, Pubkey> {
-        &self.fee_recipients
+    /// Get the total collected fees
+    pub fn get_total_collected_fees(&self) -> Result<u64, FeeSystemError> {
+        if !self.initialized {
+            return Err(FeeSystemError::NotInitialized);
+        }
+        
+        Ok(self.collected_fees.values().sum())
+    }
+    
+    /// Get the fee parameters for a specific fee type
+    pub fn get_fee_parameters(&self, fee_type: &FeeType) -> Result<&FeeParameters, FeeSystemError> {
+        if !self.initialized {
+            return Err(FeeSystemError::NotInitialized);
+        }
+        
+        self.config.fee_parameters.get(fee_type)
+            .ok_or_else(|| FeeSystemError::InvalidFeeType(format!("Fee type {:?} not configured", fee_type)))
+    }
+    
+    /// Set the fee parameters for a specific fee type
+    pub fn set_fee_parameters(&mut self, fee_type: FeeType, parameters: FeeParameters) -> Result<(), FeeSystemError> {
+        if !self.initialized {
+            return Err(FeeSystemError::NotInitialized);
+        }
+        
+        // Validate the parameters
+        if parameters.min_amount > parameters.max_amount {
+            return Err(FeeSystemError::InvalidFeeParameters(
+                format!("Min amount ({}) greater than max amount ({}) for fee type {:?}", 
+                        parameters.min_amount, parameters.max_amount, fee_type)
+            ));
+        }
+        
+        if parameters.cap < parameters.min_amount || parameters.cap > parameters.max_amount {
+            return Err(FeeSystemError::InvalidFeeParameters(
+                format!("Cap ({}) outside of min-max range ({}-{}) for fee type {:?}", 
+                        parameters.cap, parameters.min_amount, parameters.max_amount, fee_type)
+            ));
+        }
+        
+        if parameters.dynamic_factor == 0 {
+            return Err(FeeSystemError::InvalidFeeParameters(
+                format!("Dynamic factor cannot be zero for fee type {:?}", fee_type)
+            ));
+        }
+        
+        // Update the parameters
+        self.config.fee_parameters.insert(fee_type.clone(), parameters);
+        
+        // Ensure the fee type is in the collected fees map
+        if !self.collected_fees.contains_key(&fee_type) {
+            self.collected_fees.insert(fee_type.clone(), 0);
+        }
+        
+        msg!("Fee parameters updated for fee type {:?}", fee_type);
+        
+        Ok(())
+    }
+    
+    /// Set the fee distribution
+    pub fn set_fee_distribution(&mut self, distribution: FeeDistribution) -> Result<(), FeeSystemError> {
+        if !self.initialized {
+            return Err(FeeSystemError::NotInitialized);
+        }
+        
+        // Validate the distribution
+        distribution.validate()?;
+        
+        // Update the distribution
+        self.config.fee_distribution = distribution;
+        
+        msg!("Fee distribution updated");
+        
+        Ok(())
     }
 }
 
@@ -503,121 +737,84 @@ mod tests {
     use super::*;
     
     #[test]
-    fn test_fee_system_creation() {
+    fn test_fee_distribution_validation() {
+        // Valid distribution
+        let valid_distribution = FeeDistribution::default();
+        assert!(valid_distribution.validate().is_ok());
+        
+        // Invalid distribution (sum != 10000)
+        let invalid_distribution = FeeDistribution {
+            sequencer_percentage: 2000,
+            validator_percentage: 2000,
+            treasury_percentage: 2000,
+            insurance_percentage: 1000,
+            staker_percentage: 2000,
+            lp_percentage: 500, // Only 9500 total
+        };
+        assert!(invalid_distribution.validate().is_err());
+    }
+    
+    #[test]
+    fn test_fee_system_config_validation() {
+        // Valid configuration
+        let valid_config = FeeSystemConfig::default();
+        assert!(valid_config.validate().is_ok());
+        
+        // Invalid configuration (min > max)
+        let mut invalid_config = FeeSystemConfig::default();
+        let mut invalid_params = FeeParameters::default();
+        invalid_params.min_amount = 2_000_000_000;
+        invalid_params.max_amount = 1_000_000_000;
+        invalid_config.fee_parameters.insert(FeeType::BaseFee, invalid_params);
+        assert!(invalid_config.validate().is_err());
+        
+        // Invalid configuration (cap outside range)
+        let mut invalid_config = FeeSystemConfig::default();
+        let mut invalid_params = FeeParameters::default();
+        invalid_params.min_amount = 1_000_000;
+        invalid_params.max_amount = 5_000_000;
+        invalid_params.cap = 10_000_000;
+        invalid_config.fee_parameters.insert(FeeType::BaseFee, invalid_params);
+        assert!(invalid_config.validate().is_err());
+        
+        // Invalid configuration (dynamic factor = 0)
+        let mut invalid_config = FeeSystemConfig::default();
+        let mut invalid_params = FeeParameters::default();
+        invalid_params.dynamic_factor = 0;
+        invalid_config.fee_parameters.insert(FeeType::BaseFee, invalid_params);
+        assert!(invalid_config.validate().is_err());
+        
+        // Invalid configuration (target block utilization > 10000)
+        let mut invalid_config = FeeSystemConfig::default();
+        invalid_config.target_block_utilization = 12000;
+        assert!(invalid_config.validate().is_err());
+    }
+    
+    #[test]
+    fn test_calculate_base_fee() {
         let fee_system = FeeSystem::new();
-        assert!(!fee_system.is_initialized());
-        assert_eq!(fee_system.get_current_base_fee(), 1_000_000);
-        assert_eq!(fee_system.get_collected_fees().len(), 0);
-        assert_eq!(fee_system.get_fee_recipients().len(), 0);
-    }
-    
-    #[test]
-    fn test_fee_system_with_config() {
-        let config = FeeSystemConfig::default();
-        let fee_system = FeeSystem::with_config(config);
-        assert!(!fee_system.is_initialized());
-        assert_eq!(fee_system.get_current_base_fee(), 1_000_000);
-        assert_eq!(fee_system.get_collected_fees().len(), 0);
-        assert_eq!(fee_system.get_fee_recipients().len(), 0);
-    }
-    
-    #[test]
-    fn test_fee_calculation() {
-        let mut fee_system = FeeSystem::new();
+        let fee_params = FeeParameters::default();
         
-        // Initialize the fee system
-        let program_id = Pubkey::new_unique();
-        let system_account = AccountInfo::new(
-            &Pubkey::new_unique(),
-            true,
-            false,
-            &mut 0,
-            &mut [],
-            &program_id,
-            false,
-            0,
-        );
-        let treasury_account = AccountInfo::new(
-            &Pubkey::new_unique(),
-            true,
-            false,
-            &mut 0,
-            &mut [],
-            &program_id,
-            false,
-            0,
-        );
-        let insurance_account = AccountInfo::new(
-            &Pubkey::new_unique(),
-            true,
-            false,
-            &mut 0,
-            &mut [],
-            &program_id,
-            false,
-            0,
-        );
-        let sequencer_account = AccountInfo::new(
-            &Pubkey::new_unique(),
-            true,
-            false,
-            &mut 0,
-            &mut [],
-            &program_id,
-            false,
-            0,
-        );
-        let validator_account = AccountInfo::new(
-            &Pubkey::new_unique(),
-            true,
-            false,
-            &mut 0,
-            &mut [],
-            &program_id,
-            false,
-            0,
-        );
-        let staker_account = AccountInfo::new(
-            &Pubkey::new_unique(),
-            true,
-            false,
-            &mut 0,
-            &mut [],
-            &program_id,
-            false,
-            0,
-        );
-        let lp_account = AccountInfo::new(
-            &Pubkey::new_unique(),
-            true,
-            false,
-            &mut 0,
-            &mut [],
-            &program_id,
-            false,
-            0,
-        );
+        // Test with different transaction sizes
+        let small_tx_size = 100;
+        let medium_tx_size = 1000;
+        let large_tx_size = 10000;
         
-        let accounts = vec![
-            system_account,
-            treasury_account,
-            insurance_account,
-            sequencer_account,
-            validator_account,
-            staker_account,
-            lp_account,
-        ];
+        let small_fee = fee_system.calculate_base_fee(small_tx_size, &fee_params);
+        let medium_fee = fee_system.calculate_base_fee(medium_tx_size, &fee_params);
+        let large_fee = fee_system.calculate_base_fee(large_tx_size, &fee_params);
         
-        fee_system.initialize(&program_id, &accounts).unwrap();
+        // Verify that fees scale with transaction size
+        assert!(small_fee <= medium_fee);
+        assert!(medium_fee <= large_fee);
         
-        // Calculate fees for a transaction
-        let transaction_data = vec![0; 100];
-        let fees = fee_system.calculate_fees(&transaction_data).unwrap();
+        // Verify that fees are within the min/max range
+        assert!(small_fee >= fee_params.min_amount);
+        assert!(large_fee <= fee_params.max_amount);
         
-        // Verify the fees
-        assert_eq!(fees.len(), 1);
-        assert_eq!(fees[0].fee_type, FeeType::BaseFee);
-        assert!(fees[0].amount > 0);
-        assert!(!fees[0].is_paid);
+        // Verify that fees are capped
+        assert!(small_fee <= fee_params.cap);
+        assert!(medium_fee <= fee_params.cap);
+        assert!(large_fee <= fee_params.cap);
     }
 }

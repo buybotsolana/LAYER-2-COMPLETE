@@ -19,6 +19,44 @@ use solana_program::{
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::collections::HashMap;
+use thiserror::Error;
+
+/// Errors that can occur in the Data Availability module
+#[derive(Error, Debug)]
+pub enum DataAvailabilityError {
+    #[error("Data availability layer not initialized")]
+    NotInitialized,
+
+    #[error("Data size exceeds maximum allowed size")]
+    DataTooLarge,
+
+    #[error("Invalid erasure coding parameters")]
+    InvalidErasureCodingParams,
+
+    #[error("Block not found")]
+    BlockNotFound,
+
+    #[error("Invalid commitment type")]
+    InvalidCommitmentType,
+
+    #[error("Data verification failed")]
+    VerificationFailed,
+
+    #[error("Invalid sampling parameters")]
+    InvalidSamplingParams,
+
+    #[error("Insufficient data chunks for recovery")]
+    InsufficientChunks,
+
+    #[error("Program error: {0}")]
+    ProgramError(#[from] ProgramError),
+
+    #[error("Unknown error")]
+    Unknown,
+}
+
+/// Result type for Data Availability operations
+pub type DataAvailabilityResult<T> = Result<T, DataAvailabilityError>;
 
 /// Data availability strategy enumeration
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -82,6 +120,29 @@ pub struct DataAvailabilityConfig {
     
     /// Number of shards (if using sharding)
     pub num_shards: u32,
+}
+
+impl DataAvailabilityConfig {
+    /// Validate the configuration
+    pub fn validate(&self) -> DataAvailabilityResult<()> {
+        // Validate erasure coding parameters
+        let (k, n) = self.erasure_coding_params;
+        if k == 0 || n == 0 || k > n {
+            return Err(DataAvailabilityError::InvalidErasureCodingParams);
+        }
+
+        // Validate sampling percentage
+        if self.sampling_percentage > 10000 {
+            return Err(DataAvailabilityError::InvalidSamplingParams);
+        }
+
+        // Validate sharding parameters
+        if self.use_sharding && self.num_shards == 0 {
+            return Err(DataAvailabilityError::InvalidSamplingParams);
+        }
+
+        Ok(())
+    }
 }
 
 impl Default for DataAvailabilityConfig {
@@ -163,18 +224,21 @@ impl DataAvailabilityLayer {
     }
     
     /// Create a new data availability layer with the specified configuration
-    pub fn with_config(config: DataAvailabilityConfig) -> Self {
-        Self {
+    pub fn with_config(config: DataAvailabilityConfig) -> DataAvailabilityResult<Self> {
+        // Validate the configuration
+        config.validate()?;
+        
+        Ok(Self {
             config,
             data_chunks: HashMap::new(),
             data_commitments: HashMap::new(),
             current_block_number: 0,
             initialized: false,
-        }
+        })
     }
     
     /// Initialize the data availability layer
-    pub fn initialize(&mut self, program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    pub fn initialize(&mut self, program_id: &Pubkey, accounts: &[AccountInfo]) -> DataAvailabilityResult<()> {
         let account_info_iter = &mut accounts.iter();
         
         // Get the system account
@@ -182,7 +246,7 @@ impl DataAvailabilityLayer {
         
         // Verify the system account is owned by the program
         if system_account.owner != program_id {
-            return Err(ProgramError::IncorrectProgramId);
+            return Err(DataAvailabilityError::ProgramError(ProgramError::IncorrectProgramId));
         }
         
         self.initialized = true;
@@ -198,14 +262,14 @@ impl DataAvailabilityLayer {
     }
     
     /// Commit data to the data availability layer
-    pub fn commit_data(&mut self, data: &[u8]) -> ProgramResult {
+    pub fn commit_data(&mut self, data: &[u8]) -> DataAvailabilityResult<()> {
         if !self.initialized {
-            return Err(ProgramError::UninitializedAccount);
+            return Err(DataAvailabilityError::NotInitialized);
         }
         
         // Check if the data size is within limits
         if data.len() as u64 > self.config.max_data_size {
-            return Err(ProgramError::InvalidArgument);
+            return Err(DataAvailabilityError::DataTooLarge);
         }
         
         // Process the data based on the strategy
@@ -240,7 +304,7 @@ impl DataAvailabilityLayer {
     }
     
     /// Store the full data on-chain
-    fn store_full_data(&mut self, data: &[u8]) -> ProgramResult {
+    fn store_full_data(&mut self, data: &[u8]) -> DataAvailabilityResult<()> {
         // In a real implementation, we would store the data in the Solana storage
         // For now, we'll just create chunks and store them in memory
         
@@ -258,7 +322,7 @@ impl DataAvailabilityLayer {
     }
     
     /// Store only the commitment on-chain
-    fn store_commitment(&mut self, data: &[u8]) -> ProgramResult {
+    fn store_commitment(&mut self, data: &[u8]) -> DataAvailabilityResult<()> {
         // In a real implementation, we would store the data off-chain and only the commitment on-chain
         // For now, we'll just create the commitment and store it in memory
         
@@ -270,7 +334,7 @@ impl DataAvailabilityLayer {
     }
     
     /// Store the data in a dedicated layer
-    fn store_in_dedicated_layer(&mut self, data: &[u8]) -> ProgramResult {
+    fn store_in_dedicated_layer(&mut self, data: &[u8]) -> DataAvailabilityResult<()> {
         // In a real implementation, we would store the data in a dedicated layer like Celestia
         // For now, we'll just create chunks and store them in memory
         
@@ -288,7 +352,7 @@ impl DataAvailabilityLayer {
     }
     
     /// Store critical data on-chain and bulk data off-chain
-    fn store_hybrid(&mut self, data: &[u8]) -> ProgramResult {
+    fn store_hybrid(&mut self, data: &[u8]) -> DataAvailabilityResult<()> {
         // In a real implementation, we would store critical data on-chain and bulk data off-chain
         // For now, we'll just create chunks and store them in memory
         
@@ -306,11 +370,17 @@ impl DataAvailabilityLayer {
     }
     
     /// Create chunks from data
-    fn create_chunks(&self, data: &[u8], use_erasure_coding: bool) -> Result<Vec<DataChunk>, ProgramError> {
+    fn create_chunks(&self, data: &[u8], use_erasure_coding: bool) -> DataAvailabilityResult<Vec<DataChunk>> {
         // In a real implementation, we would use a proper erasure coding library
         // For now, we'll just create simple chunks
         
         let (k, n) = self.config.erasure_coding_params;
+        
+        // Validate parameters
+        if k == 0 || (use_erasure_coding && k >= n) {
+            return Err(DataAvailabilityError::InvalidErasureCodingParams);
+        }
+        
         let chunk_size = (data.len() as f64 / k as f64).ceil() as usize;
         
         let mut chunks = Vec::new();
@@ -360,8 +430,20 @@ impl DataAvailabilityLayer {
         Ok(chunks)
     }
     
+    /// Calculate hash for a chunk
+    fn calculate_chunk_hash(data: &[u8]) -> [u8; 32] {
+        // In a real implementation, we would use a proper hash function
+        // For now, we'll just create a simple hash
+        
+        let mut hash = [0; 32];
+        for (i, byte) in data.iter().enumerate() {
+            hash[i % 32] ^= byte;
+        }
+        hash
+    }
+    
     /// Create a commitment from data
-    fn create_commitment(&self, data: &[u8]) -> Result<DataCommitment, ProgramError> {
+    fn create_commitment(&self, data: &[u8]) -> DataAvailabilityResult<DataCommitment> {
         // In a real implementation, we would use a proper commitment scheme
         // For now, we'll just create a simple commitment
         
@@ -404,14 +486,21 @@ impl DataAvailabilityLayer {
             commitment_type: self.config.commitment_type.clone(),
             data: commitment_data,
             block_number: self.current_block_number,
-            timestamp: 0, // In a real implementation, we would use the current timestamp
+            timestamp: Self::get_current_timestamp(),
         };
         
         Ok(commitment)
     }
     
+    /// Get current timestamp
+    fn get_current_timestamp() -> u64 {
+        // In a real implementation, we would use the current timestamp
+        // For now, we'll just return 0
+        0
+    }
+    
     /// Clean up old data
-    fn cleanup_old_data(&mut self) -> ProgramResult {
+    fn cleanup_old_data(&mut self) -> DataAvailabilityResult<()> {
         // Remove data older than the retention period
         let retention_block = self.current_block_number.saturating_sub(self.config.data_retention_period);
         
@@ -432,14 +521,14 @@ impl DataAvailabilityLayer {
     }
     
     /// Verify data against a commitment
-    pub fn verify_data(&self, data: &[u8], block_number: u64) -> Result<bool, ProgramError> {
+    pub fn verify_data(&self, data: &[u8], block_number: u64) -> DataAvailabilityResult<bool> {
         if !self.initialized {
-            return Err(ProgramError::UninitializedAccount);
+            return Err(DataAvailabilityError::NotInitialized);
         }
         
         // Get the commitment for the block
         let commitment = self.data_commitments.get(&block_number)
-            .ok_or(ProgramError::InvalidArgument)?;
+            .ok_or(DataAvailabilityError::BlockNotFound)?;
         
         // Create a new commitment from the data
         let new_commitment = self.create_commitment(data)?;
@@ -451,69 +540,109 @@ impl DataAvailabilityLayer {
     }
     
     /// Sample data for verification
-    pub fn sample_data(&self, block_number: u64) -> Result<Vec<DataChunk>, ProgramError> {
+    pub fn sample_data(&self, block_number: u64) -> DataAvailabilityResult<Vec<DataChunk>> {
         if !self.initialized {
-            return Err(ProgramError::UninitializedAccount);
+            return Err(DataAvailabilityError::NotInitialized);
         }
         
         // Get the chunks for the block
         let chunks = self.data_chunks.get(&block_number)
-            .ok_or(ProgramError::InvalidArgument)?;
+            .ok_or(DataAvailabilityError::BlockNotFound)?;
         
         // Calculate the number of chunks to sample
         let num_chunks = chunks.len();
+        if num_chunks == 0 {
+            return Ok(Vec::new());
+        }
+        
         let num_samples = (num_chunks as u64 * self.config.sampling_percentage as u64) / 10_000;
+        if num_samples == 0 {
+            return Ok(Vec::new());
+        }
         
         // Sample the chunks
         let mut samples = Vec::new();
         
         for i in 0..num_samples {
             let index = (i * num_chunks as u64 / num_samples) as usize;
-            samples.push(chunks[index].clone());
+            if index < chunks.len() {
+                samples.push(chunks[index].clone());
+            }
         }
         
         Ok(samples)
     }
     
     /// Retrieve data for a block
-    pub fn retrieve_data(&self, block_number: u64) -> Result<Vec<u8>, ProgramError> {
+    pub fn retrieve_data(&self, block_number: u64) -> DataAvailabilityResult<Vec<u8>> {
         if !self.initialized {
-            return Err(ProgramError::UninitializedAccount);
+            return Err(DataAvailabilityError::NotInitialized);
         }
         
         // Get the chunks for the block
         let chunks = self.data_chunks.get(&block_number)
-            .ok_or(ProgramError::InvalidArgument)?;
-        
-        // Reconstruct the data from the chunks
-        let mut data = Vec::new();
+            .ok_or(DataAvailabilityError::BlockNotFound)?;
         
         // Sort the chunks by index
         let mut sorted_chunks = chunks.clone();
         sorted_chunks.sort_by_key(|chunk| chunk.index);
         
-        // Concatenate the data from the non-parity chunks
-        for chunk in sorted_chunks {
-            if !chunk.is_parity {
-                data.extend_from_slice(&chunk.data);
-            }
+        // Filter out parity chunks
+        let data_chunks: Vec<_> = sorted_chunks.iter()
+            .filter(|chunk| !chunk.is_parity)
+            .collect();
+        
+        // Check if we have enough data chunks
+        let (k, _) = self.config.erasure_coding_params;
+        if data_chunks.len() < k as usize {
+            return Err(DataAvailabilityError::InsufficientChunks);
+        }
+        
+        // Concatenate the data chunks
+        let mut data = Vec::new();
+        for chunk in data_chunks {
+            data.extend_from_slice(&chunk.data);
         }
         
         Ok(data)
     }
     
-    /// Update the data availability configuration
-    pub fn update_config(&mut self, config: DataAvailabilityConfig) -> ProgramResult {
+    /// Recover data using erasure coding
+    pub fn recover_data(&self, block_number: u64, available_chunks: &[DataChunk]) -> DataAvailabilityResult<Vec<u8>> {
         if !self.initialized {
-            return Err(ProgramError::UninitializedAccount);
+            return Err(DataAvailabilityError::NotInitialized);
         }
         
-        // Update the configuration
-        self.config = config;
+        // In a real implementation, we would use a proper erasure coding library
+        // For now, we'll just check if we have enough data chunks
         
-        msg!("Data availability configuration updated");
+        let (k, _) = self.config.erasure_coding_params;
         
-        Ok(())
+        // Count the number of data chunks
+        let data_chunks_count = available_chunks.iter()
+            .filter(|chunk| !chunk.is_parity)
+            .count();
+        
+        if data_chunks_count < k as usize {
+            return Err(DataAvailabilityError::InsufficientChunks);
+        }
+        
+        // Sort the chunks by index
+        let mut sorted_chunks = available_chunks.to_vec();
+        sorted_chunks.sort_by_key(|chunk| chunk.index);
+        
+        // Filter out parity chunks
+        let data_chunks: Vec<_> = sorted_chunks.iter()
+            .filter(|chunk| !chunk.is_parity)
+            .collect();
+        
+        // Concatenate the data chunks
+        let mut data = Vec::new();
+        for chunk in data_chunks {
+            data.extend_from_slice(&chunk.data);
+        }
+        
+        Ok(data)
     }
     
     /// Get the current block number
@@ -521,23 +650,19 @@ impl DataAvailabilityLayer {
         self.current_block_number
     }
     
-    /// Get the commitment for a block
-    pub fn get_commitment(&self, block_number: u64) -> Option<&DataCommitment> {
-        self.data_commitments.get(&block_number)
+    /// Get the data availability configuration
+    pub fn get_config(&self) -> &DataAvailabilityConfig {
+        &self.config
     }
     
-    /// Calculate the hash of a chunk
-    fn calculate_chunk_hash(data: &[u8]) -> [u8; 32] {
-        // In a real implementation, we would use a proper hash function
-        // For now, we'll just create a simple hash
+    /// Update the data availability configuration
+    pub fn update_config(&mut self, config: DataAvailabilityConfig) -> DataAvailabilityResult<()> {
+        // Validate the configuration
+        config.validate()?;
         
-        let mut hash = [0; 32];
+        self.config = config;
         
-        for (i, byte) in data.iter().enumerate() {
-            hash[i % 32] ^= byte;
-        }
-        
-        hash
+        Ok(())
     }
 }
 
@@ -546,17 +671,145 @@ mod tests {
     use super::*;
     
     #[test]
-    fn test_data_availability_layer_creation() {
-        let dal = DataAvailabilityLayer::new();
-        assert!(!dal.is_initialized());
-        assert_eq!(dal.get_current_block_number(), 0);
+    fn test_data_availability_config_validation() {
+        // Valid configuration
+        let config = DataAvailabilityConfig::default();
+        assert!(config.validate().is_ok());
+        
+        // Invalid erasure coding parameters
+        let mut invalid_config = DataAvailabilityConfig::default();
+        invalid_config.erasure_coding_params = (0, 128);
+        assert!(invalid_config.validate().is_err());
+        
+        invalid_config.erasure_coding_params = (128, 64);
+        assert!(invalid_config.validate().is_err());
+        
+        // Invalid sampling percentage
+        invalid_config = DataAvailabilityConfig::default();
+        invalid_config.sampling_percentage = 10001;
+        assert!(invalid_config.validate().is_err());
+        
+        // Invalid sharding parameters
+        invalid_config = DataAvailabilityConfig::default();
+        invalid_config.use_sharding = true;
+        invalid_config.num_shards = 0;
+        assert!(invalid_config.validate().is_err());
     }
     
     #[test]
-    fn test_data_availability_layer_with_config() {
-        let config = DataAvailabilityConfig::default();
-        let dal = DataAvailabilityLayer::with_config(config);
-        assert!(!dal.is_initialized());
-        assert_eq!(dal.get_current_block_number(), 0);
+    fn test_create_chunks() {
+        let layer = DataAvailabilityLayer::new();
+        
+        // Test with empty data
+        let data = vec![];
+        let chunks = layer.create_chunks(&data, false).unwrap();
+        assert!(chunks.is_empty());
+        
+        // Test with non-empty data
+        let data = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let chunks = layer.create_chunks(&data, false).unwrap();
+        assert_eq!(chunks.len(), 64); // Default k is 64
+        
+        // Test with erasure coding
+        let data = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let chunks = layer.create_chunks(&data, true).unwrap();
+        assert_eq!(chunks.len(), 128); // Default n is 128
+        
+        // Test with custom configuration
+        let mut config = DataAvailabilityConfig::default();
+        config.erasure_coding_params = (2, 4);
+        let layer = DataAvailabilityLayer::with_config(config).unwrap();
+        
+        let data = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let chunks = layer.create_chunks(&data, false).unwrap();
+        assert_eq!(chunks.len(), 2);
+        
+        let chunks = layer.create_chunks(&data, true).unwrap();
+        assert_eq!(chunks.len(), 4);
+    }
+    
+    #[test]
+    fn test_verify_data() {
+        let mut layer = DataAvailabilityLayer::new();
+        layer.initialized = true;
+        
+        // Commit some data
+        let data = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        layer.commit_data(&data).unwrap();
+        
+        // Verify the same data
+        let result = layer.verify_data(&data, 0).unwrap();
+        assert!(result);
+        
+        // Verify different data
+        let different_data = vec![8, 7, 6, 5, 4, 3, 2, 1];
+        let result = layer.verify_data(&different_data, 0).unwrap();
+        assert!(!result);
+        
+        // Verify non-existent block
+        let result = layer.verify_data(&data, 999);
+        assert!(result.is_err());
+    }
+    
+    #[test]
+    fn test_sample_data() {
+        let mut layer = DataAvailabilityLayer::new();
+        layer.initialized = true;
+        
+        // Commit some data
+        let data = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        layer.commit_data(&data).unwrap();
+        
+        // Sample the data
+        let samples = layer.sample_data(0).unwrap();
+        assert!(!samples.is_empty());
+        
+        // Sample non-existent block
+        let result = layer.sample_data(999);
+        assert!(result.is_err());
+    }
+    
+    #[test]
+    fn test_retrieve_data() {
+        let mut layer = DataAvailabilityLayer::new();
+        layer.initialized = true;
+        
+        // Commit some data
+        let data = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        layer.commit_data(&data).unwrap();
+        
+        // Retrieve the data
+        let retrieved_data = layer.retrieve_data(0).unwrap();
+        
+        // The retrieved data might be longer due to padding in chunks
+        assert!(retrieved_data.starts_with(&data));
+        
+        // Retrieve non-existent block
+        let result = layer.retrieve_data(999);
+        assert!(result.is_err());
+    }
+    
+    #[test]
+    fn test_cleanup_old_data() {
+        let mut layer = DataAvailabilityLayer::new();
+        layer.initialized = true;
+        
+        // Set a short retention period
+        layer.config.data_retention_period = 2;
+        
+        // Commit some data
+        let data = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        layer.commit_data(&data).unwrap();
+        layer.commit_data(&data).unwrap();
+        layer.commit_data(&data).unwrap();
+        layer.commit_data(&data).unwrap();
+        layer.commit_data(&data).unwrap();
+        
+        // Check that old data is cleaned up
+        assert!(layer.data_chunks.get(&0).is_none());
+        assert!(layer.data_chunks.get(&1).is_none());
+        assert!(layer.data_chunks.get(&2).is_none());
+        assert!(layer.data_chunks.get(&3).is_some());
+        assert!(layer.data_chunks.get(&4).is_some());
     }
 }

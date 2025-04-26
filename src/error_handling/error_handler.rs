@@ -1,369 +1,852 @@
-// src/error_handling/error_handler.rs
-//! Error handling and recovery mechanisms for Layer-2 on Solana
-//! 
-//! This module provides utilities for handling errors and implementing
-//! recovery mechanisms to ensure robust operation of the Layer-2 system.
+use std::fmt;
+use std::error::Error;
+use std::sync::Arc;
 
-use crate::error_handling::error_types::{
-    Layer2Error, FraudProofError, FinalizationError, BridgeError
-};
-use crate::interfaces::ComponentError;
-use solana_program::{
-    account_info::AccountInfo,
-    entrypoint::ProgramResult,
-    msg,
-    program_error::ProgramError,
-    pubkey::Pubkey,
-};
-use std::fmt::Debug;
-use std::panic;
-use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
+/**
+ * Sistema di gestione degli errori migliorato per Layer-2 su Solana
+ * 
+ * Questo modulo fornisce un sistema completo per la gestione degli errori,
+ * con supporto per errori tipizzati, catene di errori, contesto e logging.
+ * 
+ * @author Manus
+ */
 
-/// Error severity levels
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorSeverity {
-    /// Informational message, not an error
-    Info,
+/// Enum che rappresenta tutti i possibili errori nel sistema Layer-2
+#[derive(Debug)]
+pub enum Layer2Error {
+    /// Errori di bridge
+    Bridge(BridgeError),
     
-    /// Warning, operation can continue
-    Warning,
+    /// Errori di finalizzazione
+    Finalization(FinalizationError),
     
-    /// Error, operation failed but system can continue
-    Error,
+    /// Errori di prova di frode
+    FraudProof(FraudProofError),
     
-    /// Critical error, system may need to halt
-    Critical,
+    /// Errori di rete
+    Network(NetworkError),
     
-    /// Fatal error, system must halt
-    Fatal,
+    /// Errori di transazione
+    Transaction(TransactionError),
+    
+    /// Errori di stato
+    State(StateError),
+    
+    /// Errori di configurazione
+    Config(ConfigError),
+    
+    /// Errori di sicurezza
+    Security(SecurityError),
+    
+    /// Errori generici
+    Generic(String),
+    
+    /// Errori esterni
+    External {
+        source: Box<dyn Error + Send + Sync>,
+        context: String,
+    },
 }
 
-/// Error context information
-#[derive(Debug, Clone)]
-pub struct ErrorContext {
-    /// Component name
-    pub component: String,
+/// Errori specifici del bridge
+#[derive(Debug)]
+pub enum BridgeError {
+    /// Errore di deposito
+    DepositFailed {
+        token: String,
+        amount: u64,
+        reason: String,
+    },
     
-    /// Operation being performed
-    pub operation: String,
+    /// Errore di prelievo
+    WithdrawalFailed {
+        token: String,
+        amount: u64,
+        reason: String,
+    },
     
-    /// Error severity
-    pub severity: ErrorSeverity,
+    /// Errore di verifica del messaggio
+    MessageVerificationFailed {
+        message_id: String,
+        reason: String,
+    },
     
-    /// Timestamp of the error
-    pub timestamp: u64,
+    /// Errore di timeout
+    Timeout {
+        operation: String,
+        timeout_ms: u64,
+    },
     
-    /// Additional metadata
-    pub metadata: HashMap<String, String>,
+    /// Errore di liquidità insufficiente
+    InsufficientLiquidity {
+        token: String,
+        required: u64,
+        available: u64,
+    },
+    
+    /// Errore di token non supportato
+    UnsupportedToken(String),
+    
+    /// Errore generico del bridge
+    Other(String),
 }
 
-impl ErrorContext {
-    /// Create a new error context
-    pub fn new(component: &str, operation: &str, severity: ErrorSeverity) -> Self {
-        Self {
-            component: component.to_string(),
-            operation: operation.to_string(),
-            severity,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            metadata: HashMap::new(),
+/// Errori specifici della finalizzazione
+#[derive(Debug)]
+pub enum FinalizationError {
+    /// Errore di consenso
+    ConsensusFailure {
+        block_number: u64,
+        reason: String,
+    },
+    
+    /// Errore di checkpoint
+    CheckpointFailure {
+        checkpoint_id: String,
+        reason: String,
+    },
+    
+    /// Errore di stake insufficiente
+    InsufficientStake {
+        validator: String,
+        required: u64,
+        actual: u64,
+    },
+    
+    /// Errore di timeout
+    Timeout {
+        operation: String,
+        timeout_ms: u64,
+    },
+    
+    /// Errore di finalità
+    FinalityFailure {
+        block_number: u64,
+        reason: String,
+    },
+    
+    /// Errore generico di finalizzazione
+    Other(String),
+}
+
+/// Errori specifici della prova di frode
+#[derive(Debug)]
+pub enum FraudProofError {
+    /// Errore di verifica della prova
+    ProofVerificationFailed {
+        proof_id: String,
+        reason: String,
+    },
+    
+    /// Errore di bisection
+    BisectionFailed {
+        game_id: String,
+        step: u32,
+        reason: String,
+    },
+    
+    /// Errore di timeout
+    Timeout {
+        operation: String,
+        timeout_ms: u64,
+    },
+    
+    /// Errore di stato invalido
+    InvalidState {
+        expected: String,
+        actual: String,
+    },
+    
+    /// Errore di transizione di stato invalida
+    InvalidStateTransition {
+        from: String,
+        to: String,
+        reason: String,
+    },
+    
+    /// Errore generico di prova di frode
+    Other(String),
+}
+
+/// Errori specifici di rete
+#[derive(Debug)]
+pub enum NetworkError {
+    /// Errore di connessione
+    ConnectionFailed {
+        endpoint: String,
+        reason: String,
+    },
+    
+    /// Errore di timeout
+    Timeout {
+        operation: String,
+        timeout_ms: u64,
+    },
+    
+    /// Errore di rate limit
+    RateLimited {
+        endpoint: String,
+        limit: u32,
+        reset_after_ms: u64,
+    },
+    
+    /// Errore di risposta
+    ResponseError {
+        endpoint: String,
+        status_code: u16,
+        message: String,
+    },
+    
+    /// Errore di serializzazione/deserializzazione
+    SerializationError {
+        context: String,
+        reason: String,
+    },
+    
+    /// Errore generico di rete
+    Other(String),
+}
+
+/// Errori specifici di transazione
+#[derive(Debug)]
+pub enum TransactionError {
+    /// Errore di firma
+    SignatureError {
+        reason: String,
+    },
+    
+    /// Errore di gas insufficiente
+    InsufficientGas {
+        required: u64,
+        provided: u64,
+    },
+    
+    /// Errore di nonce invalido
+    InvalidNonce {
+        expected: u64,
+        actual: u64,
+    },
+    
+    /// Errore di saldo insufficiente
+    InsufficientBalance {
+        address: String,
+        required: u64,
+        available: u64,
+    },
+    
+    /// Errore di esecuzione
+    ExecutionError {
+        tx_hash: String,
+        reason: String,
+    },
+    
+    /// Errore di timeout
+    Timeout {
+        tx_hash: String,
+        timeout_ms: u64,
+    },
+    
+    /// Errore di transazione rifiutata
+    Rejected {
+        tx_hash: String,
+        reason: String,
+    },
+    
+    /// Errore generico di transazione
+    Other(String),
+}
+
+/// Errori specifici di stato
+#[derive(Debug)]
+pub enum StateError {
+    /// Errore di accesso allo stato
+    AccessError {
+        key: String,
+        reason: String,
+    },
+    
+    /// Errore di stato non trovato
+    NotFound {
+        key: String,
+    },
+    
+    /// Errore di corruzione dello stato
+    Corruption {
+        context: String,
+        reason: String,
+    },
+    
+    /// Errore di sincronizzazione dello stato
+    SyncError {
+        context: String,
+        reason: String,
+    },
+    
+    /// Errore di prova di Merkle
+    MerkleProofError {
+        key: String,
+        reason: String,
+    },
+    
+    /// Errore generico di stato
+    Other(String),
+}
+
+/// Errori specifici di configurazione
+#[derive(Debug)]
+pub enum ConfigError {
+    /// Errore di parsing
+    ParseError {
+        key: String,
+        value: String,
+        reason: String,
+    },
+    
+    /// Errore di validazione
+    ValidationError {
+        key: String,
+        value: String,
+        reason: String,
+    },
+    
+    /// Errore di chiave mancante
+    MissingKey {
+        key: String,
+    },
+    
+    /// Errore di tipo invalido
+    InvalidType {
+        key: String,
+        expected: String,
+        actual: String,
+    },
+    
+    /// Errore di caricamento della configurazione
+    LoadError {
+        path: String,
+        reason: String,
+    },
+    
+    /// Errore generico di configurazione
+    Other(String),
+}
+
+/// Errori specifici di sicurezza
+#[derive(Debug)]
+pub enum SecurityError {
+    /// Errore di autenticazione
+    AuthenticationFailed {
+        user: String,
+        reason: String,
+    },
+    
+    /// Errore di autorizzazione
+    AuthorizationFailed {
+        user: String,
+        resource: String,
+        action: String,
+    },
+    
+    /// Errore di validazione del token
+    TokenValidationFailed {
+        token_type: String,
+        reason: String,
+    },
+    
+    /// Errore di rate limit
+    RateLimited {
+        user: String,
+        limit: u32,
+        reset_after_ms: u64,
+    },
+    
+    /// Errore di input invalido
+    InvalidInput {
+        field: String,
+        reason: String,
+    },
+    
+    /// Errore generico di sicurezza
+    Other(String),
+}
+
+impl fmt::Display for Layer2Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Layer2Error::Bridge(err) => write!(f, "Bridge error: {}", err),
+            Layer2Error::Finalization(err) => write!(f, "Finalization error: {}", err),
+            Layer2Error::FraudProof(err) => write!(f, "Fraud proof error: {}", err),
+            Layer2Error::Network(err) => write!(f, "Network error: {}", err),
+            Layer2Error::Transaction(err) => write!(f, "Transaction error: {}", err),
+            Layer2Error::State(err) => write!(f, "State error: {}", err),
+            Layer2Error::Config(err) => write!(f, "Configuration error: {}", err),
+            Layer2Error::Security(err) => write!(f, "Security error: {}", err),
+            Layer2Error::Generic(msg) => write!(f, "Error: {}", msg),
+            Layer2Error::External { source, context } => {
+                write!(f, "External error: {} (Context: {})", source, context)
+            }
         }
     }
-    
-    /// Add metadata to the error context
-    pub fn with_metadata(mut self, key: &str, value: &str) -> Self {
-        self.metadata.insert(key.to_string(), value.to_string());
-        self
+}
+
+impl fmt::Display for BridgeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BridgeError::DepositFailed { token, amount, reason } => {
+                write!(f, "Deposit failed for {} {} - {}", amount, token, reason)
+            }
+            BridgeError::WithdrawalFailed { token, amount, reason } => {
+                write!(f, "Withdrawal failed for {} {} - {}", amount, token, reason)
+            }
+            BridgeError::MessageVerificationFailed { message_id, reason } => {
+                write!(f, "Message verification failed for {} - {}", message_id, reason)
+            }
+            BridgeError::Timeout { operation, timeout_ms } => {
+                write!(f, "Timeout after {}ms during {}", timeout_ms, operation)
+            }
+            BridgeError::InsufficientLiquidity { token, required, available } => {
+                write!(f, "Insufficient liquidity for {}: required {}, available {}", token, required, available)
+            }
+            BridgeError::UnsupportedToken(token) => {
+                write!(f, "Unsupported token: {}", token)
+            }
+            BridgeError::Other(msg) => {
+                write!(f, "{}", msg)
+            }
+        }
     }
 }
 
-/// Error handler for Layer-2 components
+impl fmt::Display for FinalizationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FinalizationError::ConsensusFailure { block_number, reason } => {
+                write!(f, "Consensus failure for block {}: {}", block_number, reason)
+            }
+            FinalizationError::CheckpointFailure { checkpoint_id, reason } => {
+                write!(f, "Checkpoint failure for {}: {}", checkpoint_id, reason)
+            }
+            FinalizationError::InsufficientStake { validator, required, actual } => {
+                write!(f, "Insufficient stake for validator {}: required {}, actual {}", validator, required, actual)
+            }
+            FinalizationError::Timeout { operation, timeout_ms } => {
+                write!(f, "Timeout after {}ms during {}", timeout_ms, operation)
+            }
+            FinalizationError::FinalityFailure { block_number, reason } => {
+                write!(f, "Finality failure for block {}: {}", block_number, reason)
+            }
+            FinalizationError::Other(msg) => {
+                write!(f, "{}", msg)
+            }
+        }
+    }
+}
+
+impl fmt::Display for FraudProofError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FraudProofError::ProofVerificationFailed { proof_id, reason } => {
+                write!(f, "Proof verification failed for {}: {}", proof_id, reason)
+            }
+            FraudProofError::BisectionFailed { game_id, step, reason } => {
+                write!(f, "Bisection failed for game {} at step {}: {}", game_id, step, reason)
+            }
+            FraudProofError::Timeout { operation, timeout_ms } => {
+                write!(f, "Timeout after {}ms during {}", timeout_ms, operation)
+            }
+            FraudProofError::InvalidState { expected, actual } => {
+                write!(f, "Invalid state: expected {}, got {}", expected, actual)
+            }
+            FraudProofError::InvalidStateTransition { from, to, reason } => {
+                write!(f, "Invalid state transition from {} to {}: {}", from, to, reason)
+            }
+            FraudProofError::Other(msg) => {
+                write!(f, "{}", msg)
+            }
+        }
+    }
+}
+
+impl fmt::Display for NetworkError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NetworkError::ConnectionFailed { endpoint, reason } => {
+                write!(f, "Connection failed to {}: {}", endpoint, reason)
+            }
+            NetworkError::Timeout { operation, timeout_ms } => {
+                write!(f, "Network timeout after {}ms during {}", timeout_ms, operation)
+            }
+            NetworkError::RateLimited { endpoint, limit, reset_after_ms } => {
+                write!(f, "Rate limited at {} (limit: {}, reset after: {}ms)", endpoint, limit, reset_after_ms)
+            }
+            NetworkError::ResponseError { endpoint, status_code, message } => {
+                write!(f, "Response error from {}: {} - {}", endpoint, status_code, message)
+            }
+            NetworkError::SerializationError { context, reason } => {
+                write!(f, "Serialization error in {}: {}", context, reason)
+            }
+            NetworkError::Other(msg) => {
+                write!(f, "{}", msg)
+            }
+        }
+    }
+}
+
+impl fmt::Display for TransactionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TransactionError::SignatureError { reason } => {
+                write!(f, "Signature error: {}", reason)
+            }
+            TransactionError::InsufficientGas { required, provided } => {
+                write!(f, "Insufficient gas: required {}, provided {}", required, provided)
+            }
+            TransactionError::InvalidNonce { expected, actual } => {
+                write!(f, "Invalid nonce: expected {}, got {}", expected, actual)
+            }
+            TransactionError::InsufficientBalance { address, required, available } => {
+                write!(f, "Insufficient balance for {}: required {}, available {}", address, required, available)
+            }
+            TransactionError::ExecutionError { tx_hash, reason } => {
+                write!(f, "Execution error for transaction {}: {}", tx_hash, reason)
+            }
+            TransactionError::Timeout { tx_hash, timeout_ms } => {
+                write!(f, "Transaction {} timed out after {}ms", tx_hash, timeout_ms)
+            }
+            TransactionError::Rejected { tx_hash, reason } => {
+                write!(f, "Transaction {} rejected: {}", tx_hash, reason)
+            }
+            TransactionError::Other(msg) => {
+                write!(f, "{}", msg)
+            }
+        }
+    }
+}
+
+impl fmt::Display for StateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StateError::AccessError { key, reason } => {
+                write!(f, "State access error for key {}: {}", key, reason)
+            }
+            StateError::NotFound { key } => {
+                write!(f, "State key not found: {}", key)
+            }
+            StateError::Corruption { context, reason } => {
+                write!(f, "State corruption in {}: {}", context, reason)
+            }
+            StateError::SyncError { context, reason } => {
+                write!(f, "State sync error in {}: {}", context, reason)
+            }
+            StateError::MerkleProofError { key, reason } => {
+                write!(f, "Merkle proof error for key {}: {}", key, reason)
+            }
+            StateError::Other(msg) => {
+                write!(f, "{}", msg)
+            }
+        }
+    }
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConfigError::ParseError { key, value, reason } => {
+                write!(f, "Config parse error for {} = {}: {}", key, value, reason)
+            }
+            ConfigError::ValidationError { key, value, reason } => {
+                write!(f, "Config validation error for {} = {}: {}", key, value, reason)
+            }
+            ConfigError::MissingKey { key } => {
+                write!(f, "Missing config key: {}", key)
+            }
+            ConfigError::InvalidType { key, expected, actual } => {
+                write!(f, "Invalid type for config key {}: expected {}, got {}", key, expected, actual)
+            }
+            ConfigError::LoadError { path, reason } => {
+                write!(f, "Failed to load config from {}: {}", path, reason)
+            }
+            ConfigError::Other(msg) => {
+                write!(f, "{}", msg)
+            }
+        }
+    }
+}
+
+impl fmt::Display for SecurityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SecurityError::AuthenticationFailed { user, reason } => {
+                write!(f, "Authentication failed for user {}: {}", user, reason)
+            }
+            SecurityError::AuthorizationFailed { user, resource, action } => {
+                write!(f, "Authorization failed for user {} to {} on {}", user, action, resource)
+            }
+            SecurityError::TokenValidationFailed { token_type, reason } => {
+                write!(f, "{} token validation failed: {}", token_type, reason)
+            }
+            SecurityError::RateLimited { user, limit, reset_after_ms } => {
+                write!(f, "Rate limit exceeded for user {} (limit: {}, reset after: {}ms)", user, limit, reset_after_ms)
+            }
+            SecurityError::InvalidInput { field, reason } => {
+                write!(f, "Invalid input for {}: {}", field, reason)
+            }
+            SecurityError::Other(msg) => {
+                write!(f, "{}", msg)
+            }
+        }
+    }
+}
+
+impl Error for Layer2Error {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Layer2Error::External { source, .. } => Some(source.as_ref()),
+            _ => None,
+        }
+    }
+}
+
+/// Tipo Result specifico per Layer-2
+pub type Layer2Result<T> = Result<T, Layer2Error>;
+
+/// Gestore degli errori per Layer-2
 pub struct ErrorHandler {
-    /// Maximum number of errors to store
-    max_errors: usize,
+    /// Logger per gli errori
+    logger: Arc<dyn Logger + Send + Sync>,
     
-    /// Recent errors
-    recent_errors: Arc<Mutex<Vec<(Box<dyn ComponentError>, ErrorContext)>>>,
+    /// Callback per gli errori critici
+    critical_error_callback: Option<Box<dyn Fn(&Layer2Error) + Send + Sync>>,
+}
+
+/// Trait per il logging
+pub trait Logger: Send + Sync {
+    /// Log di debug
+    fn debug(&self, message: &str);
     
-    /// Error counts by type
-    error_counts: Arc<Mutex<HashMap<String, usize>>>,
+    /// Log di info
+    fn info(&self, message: &str);
     
-    /// Recovery strategies
-    recovery_strategies: Arc<Mutex<HashMap<String, Box<dyn Fn(&dyn ComponentError, &ErrorContext) -> ProgramResult + Send + Sync>>>>,
+    /// Log di warning
+    fn warn(&self, message: &str);
+    
+    /// Log di errore
+    fn error(&self, message: &str);
+    
+    /// Log di errore critico
+    fn critical(&self, message: &str);
 }
 
 impl ErrorHandler {
-    /// Create a new error handler
-    pub fn new(max_errors: usize) -> Self {
-        // Set up panic hook to log panics
-        panic::set_hook(Box::new(|panic_info| {
-            let location = panic_info.location().unwrap_or_else(|| panic::Location::caller());
-            let message = match panic_info.payload().downcast_ref::<&'static str>() {
-                Some(s) => *s,
-                None => match panic_info.payload().downcast_ref::<String>() {
-                    Some(s) => s.as_str(),
-                    None => "Unknown panic payload",
-                },
-            };
-            
-            msg!("PANIC: {} at {}:{}:{}", 
-                message, 
-                location.file(), 
-                location.line(), 
-                location.column()
-            );
-        }));
-        
-        Self {
-            max_errors,
-            recent_errors: Arc::new(Mutex::new(Vec::new())),
-            error_counts: Arc::new(Mutex::new(HashMap::new())),
-            recovery_strategies: Arc::new(Mutex::new(HashMap::new())),
+    /// Crea un nuovo gestore degli errori
+    pub fn new(logger: Arc<dyn Logger + Send + Sync>) -> Self {
+        ErrorHandler {
+            logger,
+            critical_error_callback: None,
         }
     }
     
-    /// Handle an error
-    pub fn handle_error<E: ComponentError + 'static>(
-        &self,
-        error: E,
-        context: ErrorContext,
-    ) -> ProgramResult {
-        // Log the error
-        msg!("ERROR [{}] {}: {} ({})", 
-            context.severity as u8,
-            context.component,
-            error.error_message(),
-            error.error_code()
-        );
-        
-        // Update error counts
-        let error_type = std::any::type_name::<E>().to_string();
-        let mut error_counts = self.error_counts.lock().unwrap();
-        *error_counts.entry(error_type.clone()).or_insert(0) += 1;
-        
-        // Store the error if it's significant
-        if context.severity >= ErrorSeverity::Error {
-            let mut recent_errors = self.recent_errors.lock().unwrap();
-            if recent_errors.len() >= self.max_errors {
-                recent_errors.remove(0);
+    /// Imposta il callback per gli errori critici
+    pub fn set_critical_error_callback<F>(&mut self, callback: F)
+    where
+        F: Fn(&Layer2Error) + Send + Sync + 'static,
+    {
+        self.critical_error_callback = Some(Box::new(callback));
+    }
+    
+    /// Gestisce un errore
+    pub fn handle_error(&self, error: &Layer2Error) {
+        // Log dell'errore
+        match error {
+            Layer2Error::Bridge(BridgeError::Timeout { .. }) |
+            Layer2Error::Finalization(FinalizationError::Timeout { .. }) |
+            Layer2Error::FraudProof(FraudProofError::Timeout { .. }) |
+            Layer2Error::Network(NetworkError::Timeout { .. }) |
+            Layer2Error::Transaction(TransactionError::Timeout { .. }) => {
+                self.logger.warn(&format!("Timeout error: {}", error));
+            },
+            Layer2Error::Bridge(BridgeError::InsufficientLiquidity { .. }) |
+            Layer2Error::Finalization(FinalizationError::InsufficientStake { .. }) |
+            Layer2Error::Transaction(TransactionError::InsufficientGas { .. }) |
+            Layer2Error::Transaction(TransactionError::InsufficientBalance { .. }) => {
+                self.logger.warn(&format!("Resource error: {}", error));
+            },
+            Layer2Error::State(StateError::NotFound { .. }) |
+            Layer2Error::Config(ConfigError::MissingKey { .. }) => {
+                self.logger.warn(&format!("Not found error: {}", error));
+            },
+            Layer2Error::Network(NetworkError::ConnectionFailed { .. }) |
+            Layer2Error::Network(NetworkError::ResponseError { .. }) => {
+                self.logger.error(&format!("Network error: {}", error));
+            },
+            Layer2Error::Security(_) => {
+                self.logger.error(&format!("Security error: {}", error));
+            },
+            Layer2Error::State(StateError::Corruption { .. }) => {
+                self.logger.critical(&format!("Critical state error: {}", error));
+                if let Some(callback) = &self.critical_error_callback {
+                    callback(error);
+                }
+            },
+            _ => {
+                self.logger.error(&format!("Error: {}", error));
             }
-            recent_errors.push((Box::new(error.clone()), context.clone()));
-        }
-        
-        // Check if we have a recovery strategy for this error type
-        let recovery_strategies = self.recovery_strategies.lock().unwrap();
-        if let Some(strategy) = recovery_strategies.get(&error_type) {
-            return strategy(&error, &context);
-        }
-        
-        // Default handling based on severity
-        match context.severity {
-            ErrorSeverity::Info | ErrorSeverity::Warning => {
-                // Log but continue
-                Ok(())
-            },
-            ErrorSeverity::Error | ErrorSeverity::Critical | ErrorSeverity::Fatal => {
-                // Convert to program error and return
-                Err(error.to_program_error())
-            },
         }
     }
     
-    /// Register a recovery strategy for an error type
-    pub fn register_recovery_strategy<E: ComponentError + 'static>(
-        &self,
-        strategy: Box<dyn Fn(&E, &ErrorContext) -> ProgramResult + Send + Sync>,
-    ) {
-        let error_type = std::any::type_name::<E>().to_string();
-        let mut recovery_strategies = self.recovery_strategies.lock().unwrap();
-        
-        // Wrap the typed strategy in a dynamic one
-        let dynamic_strategy = Box::new(move |error: &dyn ComponentError, context: &ErrorContext| -> ProgramResult {
-            if let Some(typed_error) = error.downcast_ref::<E>() {
-                strategy(typed_error, context)
-            } else {
-                Err(ProgramError::Custom(9999)) // Should never happen
+    /// Gestisce un risultato
+    pub fn handle_result<T>(&self, result: &Layer2Result<T>) -> bool {
+        match result {
+            Ok(_) => true,
+            Err(error) => {
+                self.handle_error(error);
+                false
             }
+        }
+    }
+}
+
+/// Estensione per Result per aggiungere contesto agli errori
+pub trait ResultExt<T, E> {
+    /// Aggiunge contesto a un errore
+    fn with_context<C, F>(self, context: F) -> Result<T, Layer2Error>
+    where
+        F: FnOnce() -> C,
+        C: Into<String>;
+}
+
+impl<T, E: Error + Send + Sync + 'static> ResultExt<T, E> for Result<T, E> {
+    fn with_context<C, F>(self, context: F) -> Result<T, Layer2Error>
+    where
+        F: FnOnce() -> C,
+        C: Into<String>,
+    {
+        self.map_err(|error| {
+            Layer2Error::External {
+                source: Box::new(error),
+                context: context().into(),
+            }
+        })
+    }
+}
+
+/// Implementazione di default del Logger
+pub struct DefaultLogger;
+
+impl Logger for DefaultLogger {
+    fn debug(&self, message: &str) {
+        println!("DEBUG: {}", message);
+    }
+    
+    fn info(&self, message: &str) {
+        println!("INFO: {}", message);
+    }
+    
+    fn warn(&self, message: &str) {
+        println!("WARN: {}", message);
+    }
+    
+    fn error(&self, message: &str) {
+        println!("ERROR: {}", message);
+    }
+    
+    fn critical(&self, message: &str) {
+        println!("CRITICAL: {}", message);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    
+    #[derive(Default)]
+    struct TestLogger {
+        logs: Mutex<Vec<(String, String)>>,
+    }
+    
+    impl Logger for TestLogger {
+        fn debug(&self, message: &str) {
+            self.logs.lock().unwrap().push(("DEBUG".to_string(), message.to_string()));
+        }
+        
+        fn info(&self, message: &str) {
+            self.logs.lock().unwrap().push(("INFO".to_string(), message.to_string()));
+        }
+        
+        fn warn(&self, message: &str) {
+            self.logs.lock().unwrap().push(("WARN".to_string(), message.to_string()));
+        }
+        
+        fn error(&self, message: &str) {
+            self.logs.lock().unwrap().push(("ERROR".to_string(), message.to_string()));
+        }
+        
+        fn critical(&self, message: &str) {
+            self.logs.lock().unwrap().push(("CRITICAL".to_string(), message.to_string()));
+        }
+    }
+    
+    #[test]
+    fn test_error_handler() {
+        let logger = Arc::new(TestLogger::default());
+        let error_handler = ErrorHandler::new(Arc::clone(&logger));
+        
+        // Test timeout error
+        let timeout_error = Layer2Error::Network(NetworkError::Timeout {
+            operation: "fetch_block".to_string(),
+            timeout_ms: 5000,
+        });
+        error_handler.handle_error(&timeout_error);
+        
+        // Test critical error
+        let critical_error = Layer2Error::State(StateError::Corruption {
+            context: "block_state".to_string(),
+            reason: "hash mismatch".to_string(),
+        });
+        error_handler.handle_error(&critical_error);
+        
+        // Verify logs
+        let logs = logger.logs.lock().unwrap();
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].0, "WARN");
+        assert!(logs[0].1.contains("Timeout error"));
+        assert_eq!(logs[1].0, "CRITICAL");
+        assert!(logs[1].1.contains("Critical state error"));
+    }
+    
+    #[test]
+    fn test_result_ext() {
+        // Create a function that returns a std::io::Error
+        fn io_error() -> std::io::Result<()> {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "file not found"))
+        }
+        
+        // Use with_context to convert to Layer2Error
+        let result = io_error().with_context(|| "Failed to open config file");
+        
+        // Verify the error
+        match result {
+            Ok(_) => panic!("Expected error"),
+            Err(Layer2Error::External { context, .. }) => {
+                assert_eq!(context, "Failed to open config file");
+            }
+            Err(_) => panic!("Expected External error"),
+        }
+    }
+    
+    #[test]
+    fn test_error_display() {
+        let error = Layer2Error::Bridge(BridgeError::DepositFailed {
+            token: "ETH".to_string(),
+            amount: 1000000000,
+            reason: "insufficient funds".to_string(),
         });
         
-        recovery_strategies.insert(error_type, dynamic_strategy);
+        let error_string = format!("{}", error);
+        assert!(error_string.contains("Bridge error"));
+        assert!(error_string.contains("Deposit failed"));
+        assert!(error_string.contains("ETH"));
+        assert!(error_string.contains("insufficient funds"));
     }
-    
-    /// Get recent errors
-    pub fn get_recent_errors(&self) -> Vec<(Box<dyn ComponentError>, ErrorContext)> {
-        let recent_errors = self.recent_errors.lock().unwrap();
-        recent_errors.clone()
-    }
-    
-    /// Get error counts
-    pub fn get_error_counts(&self) -> HashMap<String, usize> {
-        let error_counts = self.error_counts.lock().unwrap();
-        error_counts.clone()
-    }
-    
-    /// Clear error history
-    pub fn clear_errors(&self) {
-        let mut recent_errors = self.recent_errors.lock().unwrap();
-        recent_errors.clear();
-        
-        let mut error_counts = self.error_counts.lock().unwrap();
-        error_counts.clear();
-    }
-}
-
-/// Trait for components that can recover from errors
-pub trait Recoverable {
-    /// Attempt to recover from an error
-    fn recover(&mut self, error: &dyn ComponentError, context: &ErrorContext) -> ProgramResult;
-    
-    /// Check if the component can recover from a specific error
-    fn can_recover(&self, error: &dyn ComponentError) -> bool;
-    
-    /// Get the maximum number of recovery attempts
-    fn max_recovery_attempts(&self) -> usize;
-}
-
-/// Helper function to safely execute operations with error handling
-pub fn execute_with_recovery<F, R, E>(
-    operation: F,
-    component: &str,
-    operation_name: &str,
-    severity: ErrorSeverity,
-    error_handler: &ErrorHandler,
-) -> Result<R, E>
-where
-    F: FnOnce() -> Result<R, E>,
-    E: ComponentError + 'static,
-{
-    match operation() {
-        Ok(result) => Ok(result),
-        Err(error) => {
-            let context = ErrorContext::new(component, operation_name, severity);
-            let _ = error_handler.handle_error(error.clone(), context);
-            Err(error)
-        }
-    }
-}
-
-/// Helper function to retry operations with exponential backoff
-pub async fn retry_with_backoff<F, Fut, R, E>(
-    operation: F,
-    component: &str,
-    operation_name: &str,
-    max_attempts: usize,
-    initial_delay_ms: u64,
-    error_handler: &ErrorHandler,
-) -> Result<R, E>
-where
-    F: Fn() -> Fut,
-    Fut: std::future::Future<Output = Result<R, E>>,
-    E: ComponentError + 'static,
-{
-    let mut attempt = 0;
-    let mut delay_ms = initial_delay_ms;
-    
-    loop {
-        attempt += 1;
-        
-        match operation().await {
-            Ok(result) => return Ok(result),
-            Err(error) => {
-                let context = ErrorContext::new(
-                    component,
-                    &format!("{} (attempt {}/{})", operation_name, attempt, max_attempts),
-                    if attempt < max_attempts { ErrorSeverity::Warning } else { ErrorSeverity::Error }
-                ).with_metadata("attempt", &attempt.to_string())
-                 .with_metadata("max_attempts", &max_attempts.to_string());
-                
-                let _ = error_handler.handle_error(error.clone(), context);
-                
-                if attempt >= max_attempts {
-                    return Err(error);
-                }
-                
-                // Exponential backoff with jitter
-                let jitter = (std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() % 100) as u64;
-                
-                let sleep_ms = delay_ms + jitter;
-                std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
-                
-                // Double the delay for next attempt
-                delay_ms *= 2;
-            }
-        }
-    }
-}
-
-/// Default recovery strategies for common errors
-pub fn register_default_recovery_strategies(error_handler: &ErrorHandler) {
-    // Strategy for timeout errors
-    error_handler.register_recovery_strategy(Box::new(|error: &Layer2Error, context: &ErrorContext| -> ProgramResult {
-        match error {
-            Layer2Error::Timeout(_) => {
-                // For timeout errors, we can just retry later
-                msg!("Timeout detected in {} during {}. Will retry later.", 
-                    context.component, context.operation);
-                Ok(())
-            },
-            _ => Err(error.to_program_error()),
-        }
-    }));
-    
-    // Strategy for serialization errors
-    error_handler.register_recovery_strategy(Box::new(|error: &Layer2Error, context: &ErrorContext| -> ProgramResult {
-        match error {
-            Layer2Error::Serialization(_) | Layer2Error::Deserialization(_) => {
-                // For serialization errors, we log and return an error
-                msg!("Serialization error detected in {} during {}. Cannot recover.", 
-                    context.component, context.operation);
-                Err(error.to_program_error())
-            },
-            _ => Err(error.to_program_error()),
-        }
-    }));
-    
-    // Strategy for fraud proof errors
-    error_handler.register_recovery_strategy(Box::new(|error: &FraudProofError, context: &ErrorContext| -> ProgramResult {
-        match error {
-            FraudProofError::InvalidBisectionGame(_) => {
-                // For invalid bisection game, we can abort the game and start a new one
-                msg!("Invalid bisection game detected in {} during {}. Aborting game.", 
-                    context.component, context.operation);
-                Ok(())
-            },
-            _ => Err(error.to_program_error()),
-        }
-    }));
-    
-    // Strategy for finalization errors
-    error_handler.register_recovery_strategy(Box::new(|error: &FinalizationError, context: &ErrorContext| -> ProgramResult {
-        match error {
-            FinalizationError::ChallengePeriodNotElapsed(_) => {
-                // For challenge period not elapsed, we can just wait
-                msg!("Challenge period not elapsed in {} during {}. Will retry later.", 
-                    context.component, context.operation);
-                Ok(())
-            },
-            _ => Err(error.to_program_error()),
-        }
-    }));
-    
-    // Strategy for bridge errors
-    error_handler.register_recovery_strategy(Box::new(|error: &BridgeError, context: &ErrorContext| -> ProgramResult {
-        match error {
-            BridgeError::UnsupportedToken(_) => {
-                // For unsupported token, we can't recover
-                msg!("Unsupported token detected in {} during {}. Cannot recover.", 
-                    context.component, context.operation);
-                Err(error.to_program_error())
-            },
-            _ => Err(error.to_program_error()),
-        }
-    }));
 }

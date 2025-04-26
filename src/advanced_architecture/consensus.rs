@@ -20,6 +20,93 @@ use solana_program::{
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::collections::{HashMap, VecDeque};
+use thiserror::Error;
+
+/// Errors that may occur during consensus operations
+#[derive(Error, Debug, Clone, PartialEq, Eq)]
+pub enum ConsensusError {
+    /// Consensus system is not initialized
+    #[error("Consensus system is not initialized")]
+    NotInitialized,
+    
+    /// Participant already exists
+    #[error("Participant already exists: {0}")]
+    ParticipantAlreadyExists(String),
+    
+    /// Participant does not exist
+    #[error("Participant does not exist: {0}")]
+    ParticipantDoesNotExist(String),
+    
+    /// Insufficient stake for role
+    #[error("Insufficient stake for role {0}: required {1}, provided {2}")]
+    InsufficientStake(String, u64, u64),
+    
+    /// Maximum number of participants reached for role
+    #[error("Maximum number of participants reached for role {0}: limit {1}")]
+    MaxParticipantsReached(String, u32),
+    
+    /// No active sequencers
+    #[error("No active sequencers available")]
+    NoActiveSequencers,
+    
+    /// No active validators
+    #[error("No active validators available")]
+    NoActiveValidators,
+    
+    /// No active builders
+    #[error("No active builders available")]
+    NoActiveBuilders,
+    
+    /// No active proposers
+    #[error("No active proposers available")]
+    NoActiveProposers,
+    
+    /// Invalid block
+    #[error("Invalid block: {0}")]
+    InvalidBlock(String),
+    
+    /// Block already exists
+    #[error("Block already exists: {0}")]
+    BlockAlreadyExists(String),
+    
+    /// Block does not exist
+    #[error("Block does not exist: {0}")]
+    BlockDoesNotExist(String),
+    
+    /// Invalid block status transition
+    #[error("Invalid block status transition from {0} to {1}")]
+    InvalidBlockStatusTransition(String, String),
+    
+    /// Challenge period not expired
+    #[error("Challenge period not expired for block {0}: expires at {1}, current time {2}")]
+    ChallengePeriodNotExpired(String, u64, u64),
+    
+    /// Challenge period expired
+    #[error("Challenge period expired for block {0}: expired at {1}, current time {2}")]
+    ChallengePeriodExpired(String, u64, u64),
+    
+    /// Unauthorized operation
+    #[error("Unauthorized operation: {0}")]
+    Unauthorized(String),
+    
+    /// Invalid role for operation
+    #[error("Invalid role for operation: required {0}, provided {1}")]
+    InvalidRole(String, String),
+    
+    /// Invalid configuration
+    #[error("Invalid configuration: {0}")]
+    InvalidConfiguration(String),
+    
+    /// Generic error
+    #[error("Generic error: {0}")]
+    GenericError(String),
+}
+
+impl From<ProgramError> for ConsensusError {
+    fn from(error: ProgramError) -> Self {
+        ConsensusError::GenericError(error.to_string())
+    }
+}
 
 /// Consensus role enumeration
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -38,6 +125,18 @@ pub enum ConsensusRole {
     
     /// Challenger role (submits fraud proofs)
     Challenger,
+}
+
+impl ToString for ConsensusRole {
+    fn to_string(&self) -> String {
+        match self {
+            ConsensusRole::Sequencer => "Sequencer".to_string(),
+            ConsensusRole::Validator => "Validator".to_string(),
+            ConsensusRole::Builder => "Builder".to_string(),
+            ConsensusRole::Proposer => "Proposer".to_string(),
+            ConsensusRole::Challenger => "Challenger".to_string(),
+        }
+    }
 }
 
 /// Consensus parameters
@@ -138,6 +237,108 @@ impl Default for ConsensusConfig {
     }
 }
 
+impl ConsensusConfig {
+    /// Validate the consensus configuration
+    pub fn validate(&self) -> Result<(), ConsensusError> {
+        // Validate stake requirements
+        if self.parameters.min_sequencer_stake == 0 {
+            return Err(ConsensusError::InvalidConfiguration(
+                "Minimum sequencer stake cannot be zero".to_string()
+            ));
+        }
+        
+        if self.parameters.min_validator_stake == 0 {
+            return Err(ConsensusError::InvalidConfiguration(
+                "Minimum validator stake cannot be zero".to_string()
+            ));
+        }
+        
+        if self.use_pbs {
+            if self.parameters.min_builder_stake == 0 {
+                return Err(ConsensusError::InvalidConfiguration(
+                    "Minimum builder stake cannot be zero when PBS is enabled".to_string()
+                ));
+            }
+            
+            if self.parameters.min_proposer_stake == 0 {
+                return Err(ConsensusError::InvalidConfiguration(
+                    "Minimum proposer stake cannot be zero when PBS is enabled".to_string()
+                ));
+            }
+        }
+        
+        // Validate max participants
+        if self.parameters.max_sequencers == 0 {
+            return Err(ConsensusError::InvalidConfiguration(
+                "Maximum number of sequencers cannot be zero".to_string()
+            ));
+        }
+        
+        if self.parameters.max_validators == 0 {
+            return Err(ConsensusError::InvalidConfiguration(
+                "Maximum number of validators cannot be zero".to_string()
+            ));
+        }
+        
+        if self.use_pbs {
+            if self.parameters.max_builders == 0 {
+                return Err(ConsensusError::InvalidConfiguration(
+                    "Maximum number of builders cannot be zero when PBS is enabled".to_string()
+                ));
+            }
+            
+            if self.parameters.max_proposers == 0 {
+                return Err(ConsensusError::InvalidConfiguration(
+                    "Maximum number of proposers cannot be zero when PBS is enabled".to_string()
+                ));
+            }
+        }
+        
+        // Validate rotation interval
+        if self.enable_sequencer_rotation && self.parameters.sequencer_rotation_interval == 0 {
+            return Err(ConsensusError::InvalidConfiguration(
+                "Sequencer rotation interval cannot be zero when rotation is enabled".to_string()
+            ));
+        }
+        
+        // Validate challenge period
+        if self.parameters.challenge_period == 0 {
+            return Err(ConsensusError::InvalidConfiguration(
+                "Challenge period cannot be zero".to_string()
+            ));
+        }
+        
+        // Validate slashing and reward percentages
+        if self.enable_slashing && self.parameters.slashing_percentage == 0 {
+            return Err(ConsensusError::InvalidConfiguration(
+                "Slashing percentage cannot be zero when slashing is enabled".to_string()
+            ));
+        }
+        
+        if self.enable_slashing && self.parameters.slashing_percentage > 10000 {
+            return Err(ConsensusError::InvalidConfiguration(
+                format!("Slashing percentage cannot exceed 10000 (100%), got {}", 
+                        self.parameters.slashing_percentage)
+            ));
+        }
+        
+        if self.enable_rewards && self.parameters.reward_percentage == 0 {
+            return Err(ConsensusError::InvalidConfiguration(
+                "Reward percentage cannot be zero when rewards are enabled".to_string()
+            ));
+        }
+        
+        if self.enable_rewards && self.parameters.reward_percentage > 10000 {
+            return Err(ConsensusError::InvalidConfiguration(
+                format!("Reward percentage cannot exceed 10000 (100%), got {}", 
+                        self.parameters.reward_percentage)
+            ));
+        }
+        
+        Ok(())
+    }
+}
+
 /// Participant in the consensus
 #[derive(Debug, Clone)]
 pub struct ConsensusParticipant {
@@ -185,6 +386,17 @@ pub enum BlockStatus {
     Rejected,
 }
 
+impl ToString for BlockStatus {
+    fn to_string(&self) -> String {
+        match self {
+            BlockStatus::Proposed => "Proposed".to_string(),
+            BlockStatus::Challenged => "Challenged".to_string(),
+            BlockStatus::Finalized => "Finalized".to_string(),
+            BlockStatus::Rejected => "Rejected".to_string(),
+        }
+    }
+}
+
 /// Block in the Layer-2 chain
 #[derive(Debug, Clone)]
 pub struct Block {
@@ -226,6 +438,23 @@ pub struct Block {
     
     /// Challenges against this block
     pub challenges: Vec<Pubkey>,
+}
+
+impl Block {
+    /// Get a string representation of the block hash
+    pub fn hash_string(&self) -> String {
+        hex::encode(self.hash)
+    }
+    
+    /// Check if the block can be finalized
+    pub fn can_finalize(&self, current_time: u64) -> bool {
+        self.status == BlockStatus::Proposed && current_time >= self.challenge_deadline
+    }
+    
+    /// Check if the block can be challenged
+    pub fn can_challenge(&self, current_time: u64) -> bool {
+        self.status == BlockStatus::Proposed && current_time < self.challenge_deadline
+    }
 }
 
 /// Enhanced consensus for the Layer-2 solution
@@ -283,8 +512,11 @@ impl EnhancedConsensus {
     }
     
     /// Create a new enhanced consensus with the specified configuration
-    pub fn with_config(config: ConsensusConfig) -> Self {
-        Self {
+    pub fn with_config(config: ConsensusConfig) -> Result<Self, ConsensusError> {
+        // Validate the configuration
+        config.validate()?;
+        
+        Ok(Self {
             config,
             participants: HashMap::new(),
             active_sequencers: VecDeque::new(),
@@ -296,20 +528,26 @@ impl EnhancedConsensus {
             current_sequencer: None,
             current_block_number: 0,
             initialized: false,
-        }
+        })
     }
     
     /// Initialize the enhanced consensus
-    pub fn initialize(&mut self, program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    pub fn initialize(&mut self, program_id: &Pubkey, accounts: &[AccountInfo]) -> Result<(), ConsensusError> {
         let account_info_iter = &mut accounts.iter();
         
         // Get the system account
-        let system_account = next_account_info(account_info_iter)?;
+        let system_account = next_account_info(account_info_iter)
+            .map_err(|e| ConsensusError::GenericError(e.to_string()))?;
         
         // Verify the system account is owned by the program
         if system_account.owner != program_id {
-            return Err(ProgramError::IncorrectProgramId);
+            return Err(ConsensusError::Unauthorized(
+                "System account is not owned by the program".to_string()
+            ));
         }
+        
+        // Validate the configuration
+        self.config.validate()?;
         
         // Initialize the genesis block
         let genesis_block = Block {
@@ -346,26 +584,35 @@ impl EnhancedConsensus {
     }
     
     /// Register a participant in the consensus
-    pub fn register_participant(&mut self, pubkey: Pubkey, role: ConsensusRole, stake: u64) -> ProgramResult {
+    pub fn register_participant(&mut self, pubkey: Pubkey, role: ConsensusRole, stake: u64) -> Result<(), ConsensusError> {
         if !self.initialized {
-            return Err(ProgramError::UninitializedAccount);
+            return Err(ConsensusError::NotInitialized);
         }
         
         // Check if the participant already exists
         if self.participants.contains_key(&pubkey) {
-            return Err(ProgramError::AccountAlreadyInitialized);
+            return Err(ConsensusError::ParticipantAlreadyExists(
+                format!("{:?}", pubkey)
+            ));
         }
         
         // Check if the stake is sufficient for the role
         match role {
             ConsensusRole::Sequencer => {
                 if stake < self.config.parameters.min_sequencer_stake {
-                    return Err(ProgramError::InsufficientFunds);
+                    return Err(ConsensusError::InsufficientStake(
+                        role.to_string(),
+                        self.config.parameters.min_sequencer_stake,
+                        stake
+                    ));
                 }
                 
                 // Check if the maximum number of sequencers is reached
                 if self.active_sequencers.len() >= self.config.parameters.max_sequencers as usize {
-                    return Err(ProgramError::MaxAccountsDataSizeExceeded);
+                    return Err(ConsensusError::MaxParticipantsReached(
+                        role.to_string(),
+                        self.config.parameters.max_sequencers
+                    ));
                 }
                 
                 // Add the sequencer to the active sequencers
@@ -373,12 +620,19 @@ impl EnhancedConsensus {
             },
             ConsensusRole::Validator => {
                 if stake < self.config.parameters.min_validator_stake {
-                    return Err(ProgramError::InsufficientFunds);
+                    return Err(ConsensusError::InsufficientStake(
+                        role.to_string(),
+                        self.config.parameters.min_validator_stake,
+                        stake
+                    ));
                 }
                 
                 // Check if the maximum number of validators is reached
                 if self.active_validators.len() >= self.config.parameters.max_validators as usize {
-                    return Err(ProgramError::MaxAccountsDataSizeExceeded);
+                    return Err(ConsensusError::MaxParticipantsReached(
+                        role.to_string(),
+                        self.config.parameters.max_validators
+                    ));
                 }
                 
                 // Add the validator to the active validators
@@ -386,12 +640,19 @@ impl EnhancedConsensus {
             },
             ConsensusRole::Builder => {
                 if stake < self.config.parameters.min_builder_stake {
-                    return Err(ProgramError::InsufficientFunds);
+                    return Err(ConsensusError::InsufficientStake(
+                        role.to_string(),
+                        self.config.parameters.min_builder_stake,
+                        stake
+                    ));
                 }
                 
                 // Check if the maximum number of builders is reached
                 if self.active_builders.len() >= self.config.parameters.max_builders as usize {
-                    return Err(ProgramError::MaxAccountsDataSizeExceeded);
+                    return Err(ConsensusError::MaxParticipantsReached(
+                        role.to_string(),
+                        self.config.parameters.max_builders
+                    ));
                 }
                 
                 // Add the builder to the active builders
@@ -399,12 +660,19 @@ impl EnhancedConsensus {
             },
             ConsensusRole::Proposer => {
                 if stake < self.config.parameters.min_proposer_stake {
-                    return Err(ProgramError::InsufficientFunds);
+                    return Err(ConsensusError::InsufficientStake(
+                        role.to_string(),
+                        self.config.parameters.min_proposer_stake,
+                        stake
+                    ));
                 }
                 
                 // Check if the maximum number of proposers is reached
                 if self.active_proposers.len() >= self.config.parameters.max_proposers as usize {
-                    return Err(ProgramError::MaxAccountsDataSizeExceeded);
+                    return Err(ConsensusError::MaxParticipantsReached(
+                        role.to_string(),
+                        self.config.parameters.max_proposers
+                    ));
                 }
                 
                 // Add the proposer to the active proposers
@@ -412,7 +680,11 @@ impl EnhancedConsensus {
             },
             ConsensusRole::Challenger => {
                 if stake < self.config.parameters.min_challenger_stake {
-                    return Err(ProgramError::InsufficientFunds);
+                    return Err(ConsensusError::InsufficientStake(
+                        role.to_string(),
+                        self.config.parameters.min_challenger_stake,
+                        stake
+                    ));
                 }
             },
         }
@@ -444,14 +716,16 @@ impl EnhancedConsensus {
     }
     
     /// Unregister a participant from the consensus
-    pub fn unregister_participant(&mut self, pubkey: &Pubkey) -> ProgramResult {
+    pub fn unregister_participant(&mut self, pubkey: &Pubkey) -> Result<(), ConsensusError> {
         if !self.initialized {
-            return Err(ProgramError::UninitializedAccount);
+            return Err(ConsensusError::NotInitialized);
         }
         
         // Check if the participant exists
         let participant = self.participants.get(pubkey)
-            .ok_or(ProgramError::InvalidAccountData)?;
+            .ok_or_else(|| ConsensusError::ParticipantDoesNotExist(
+                format!("{:?}", pubkey)
+            ))?;
         
         // Remove the participant from the active list based on their role
         match participant.role {
@@ -486,9 +760,9 @@ impl EnhancedConsensus {
     }
     
     /// Rotate the current sequencer
-    pub fn rotate_sequencer(&mut self) -> ProgramResult {
+    pub fn rotate_sequencer(&mut self) -> Result<(), ConsensusError> {
         if !self.initialized {
-            return Err(ProgramError::UninitializedAccount);
+            return Err(ConsensusError::NotInitialized);
         }
         
         // Check if sequencer rotation is enabled
@@ -498,185 +772,191 @@ impl EnhancedConsensus {
         
         // Check if there are any sequencers
         if self.active_sequencers.is_empty() {
-            return Err(ProgramError::InvalidAccountData);
+            return Err(ConsensusError::NoActiveSequencers);
         }
         
         // Rotate the sequencer
-        if let Some(current_sequencer) = self.current_sequencer {
+        if let Some(current_sequencer) = self.current_sequencer.take() {
             // Move the current sequencer to the back of the queue
             self.active_sequencers.retain(|&p| p != current_sequencer);
             self.active_sequencers.push_back(current_sequencer);
+            
+            // Set the new current sequencer
+            self.current_sequencer = self.active_sequencers.front().cloned();
+            
+            if let Some(new_sequencer) = self.current_sequencer {
+                msg!("Sequencer rotated from {:?} to {:?}", current_sequencer, new_sequencer);
+            }
+        } else {
+            // No current sequencer, set the first one in the queue
+            self.current_sequencer = self.active_sequencers.front().cloned();
+            
+            if let Some(new_sequencer) = self.current_sequencer {
+                msg!("Sequencer set to {:?}", new_sequencer);
+            }
         }
-        
-        // Set the new current sequencer
-        self.current_sequencer = self.active_sequencers.front().cloned();
-        
-        msg!("Sequencer rotated: {:?}", self.current_sequencer);
         
         Ok(())
     }
     
-    /// Propose a block
+    /// Propose a new block
     pub fn propose_block(
         &mut self,
-        sequencer: &Pubkey,
+        proposer: &Pubkey,
         state_root: [u8; 32],
         transactions_root: [u8; 32],
         receipts_root: [u8; 32],
         timestamp: u64,
-        builder: Option<Pubkey>,
-        proposer: Option<Pubkey>,
-    ) -> Result<[u8; 32], ProgramError> {
+        builder: Option<&Pubkey>,
+    ) -> Result<[u8; 32], ConsensusError> {
         if !self.initialized {
-            return Err(ProgramError::UninitializedAccount);
+            return Err(ConsensusError::NotInitialized);
         }
         
-        // Check if the sequencer is the current sequencer
-        if self.current_sequencer != Some(*sequencer) {
-            return Err(ProgramError::InvalidAccountData);
+        // Check if the proposer is the current sequencer or a valid proposer
+        let is_sequencer = self.current_sequencer == Some(*proposer);
+        let is_proposer = self.config.use_pbs && self.active_proposers.contains(proposer);
+        
+        if !is_sequencer && !is_proposer {
+            return Err(ConsensusError::Unauthorized(
+                format!("Proposer {:?} is not the current sequencer or a valid proposer", proposer)
+            ));
         }
         
-        // Check if the sequencer is registered
-        if !self.participants.contains_key(sequencer) {
-            return Err(ProgramError::InvalidAccountData);
-        }
-        
-        // If using PBS, check if the builder and proposer are registered
+        // If using PBS, check if the builder is valid
         if self.config.use_pbs {
             if let Some(builder_key) = builder {
-                if !self.participants.contains_key(&builder_key) {
-                    return Err(ProgramError::InvalidAccountData);
-                }
-                
-                let builder_participant = self.participants.get(&builder_key)
-                    .ok_or(ProgramError::InvalidAccountData)?;
-                
-                if builder_participant.role != ConsensusRole::Builder {
-                    return Err(ProgramError::InvalidAccountData);
+                if !self.active_builders.contains(builder_key) {
+                    return Err(ConsensusError::Unauthorized(
+                        format!("Builder {:?} is not a valid builder", builder_key)
+                    ));
                 }
             } else {
-                return Err(ProgramError::InvalidAccountData);
-            }
-            
-            if let Some(proposer_key) = proposer {
-                if !self.participants.contains_key(&proposer_key) {
-                    return Err(ProgramError::InvalidAccountData);
-                }
-                
-                let proposer_participant = self.participants.get(&proposer_key)
-                    .ok_or(ProgramError::InvalidAccountData)?;
-                
-                if proposer_participant.role != ConsensusRole::Proposer {
-                    return Err(ProgramError::InvalidAccountData);
-                }
-            } else {
-                return Err(ProgramError::InvalidAccountData);
+                return Err(ConsensusError::InvalidConfiguration(
+                    "Builder must be specified when using PBS".to_string()
+                ));
             }
         }
         
         // Get the latest finalized block
-        let latest_block_hash = self.latest_finalized_block
-            .ok_or(ProgramError::InvalidAccountData)?;
+        let parent_hash = self.latest_finalized_block
+            .ok_or_else(|| ConsensusError::GenericError("No finalized blocks".to_string()))?;
         
-        let latest_block = self.blocks.get(&latest_block_hash)
-            .ok_or(ProgramError::InvalidAccountData)?;
+        // Create a new block hash (in a real implementation, this would be a cryptographic hash)
+        let mut block_hash = [0u8; 32];
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&parent_hash);
+        hasher.update(&state_root);
+        hasher.update(&transactions_root);
+        hasher.update(&receipts_root);
+        hasher.update(&timestamp.to_le_bytes());
+        hasher.update(&proposer.to_bytes());
+        if let Some(builder_key) = builder {
+            hasher.update(&builder_key.to_bytes());
+        }
+        block_hash.copy_from_slice(&hasher.finalize().as_bytes()[0..32]);
         
-        // Create the block
+        // Check if a block with this hash already exists
+        if self.blocks.contains_key(&block_hash) {
+            return Err(ConsensusError::BlockAlreadyExists(
+                hex::encode(block_hash)
+            ));
+        }
+        
+        // Calculate the challenge deadline
+        let challenge_deadline = timestamp + self.config.parameters.challenge_period;
+        
+        // Create the new block
         let block = Block {
             number: self.current_block_number,
-            hash: [0; 32], // Will be set below
-            parent_hash: latest_block.hash,
+            hash: block_hash,
+            parent_hash,
             state_root,
             transactions_root,
             receipts_root,
             timestamp,
-            sequencer: *sequencer,
-            builder,
-            proposer,
+            sequencer: if is_sequencer { *proposer } else { self.current_sequencer.unwrap() },
+            builder: builder.cloned(),
+            proposer: if is_proposer { Some(*proposer) } else { None },
             status: BlockStatus::Proposed,
-            challenge_deadline: timestamp + self.config.parameters.challenge_period,
+            challenge_deadline,
             challenges: Vec::new(),
         };
         
-        // Calculate the block hash
-        let block_hash = Self::calculate_block_hash(&block);
-        
-        // Set the block hash
-        let mut block = block;
-        block.hash = block_hash;
-        
-        // Add the block
+        // Add the block to the chain
         self.blocks.insert(block_hash, block);
         
         // Increment the block number
         self.current_block_number += 1;
         
-        // Update the sequencer's stats
-        if let Some(participant) = self.participants.get_mut(sequencer) {
+        // Update the participant stats
+        if let Some(participant) = self.participants.get_mut(proposer) {
             participant.blocks_proposed += 1;
             participant.last_active = timestamp;
         }
         
-        // If using PBS, update the builder's and proposer's stats
-        if self.config.use_pbs {
-            if let Some(builder_key) = builder {
-                if let Some(participant) = self.participants.get_mut(&builder_key) {
-                    participant.last_active = timestamp;
-                }
-            }
-            
-            if let Some(proposer_key) = proposer {
-                if let Some(participant) = self.participants.get_mut(&proposer_key) {
-                    participant.last_active = timestamp;
-                }
+        // If using PBS and a builder was specified, update the builder stats
+        if let Some(builder_key) = builder {
+            if let Some(builder_participant) = self.participants.get_mut(builder_key) {
+                builder_participant.last_active = timestamp;
             }
         }
         
-        // Check if it's time to rotate the sequencer
+        // Check if we need to rotate the sequencer
         if self.config.enable_sequencer_rotation && 
            self.current_block_number % self.config.parameters.sequencer_rotation_interval == 0 {
             self.rotate_sequencer()?;
         }
         
-        msg!("Block proposed: {:?}", block_hash);
+        msg!("Block proposed: number {}, hash {}", self.current_block_number - 1, hex::encode(block_hash));
         
         Ok(block_hash)
     }
     
-    /// Validate a block
-    pub fn validate_block(&mut self, validator: &Pubkey, block_hash: &[u8; 32]) -> ProgramResult {
+    /// Finalize a block
+    pub fn finalize_block(&mut self, block_hash: &[u8; 32], current_time: u64) -> Result<(), ConsensusError> {
         if !self.initialized {
-            return Err(ProgramError::UninitializedAccount);
-        }
-        
-        // Check if the validator is registered
-        if !self.participants.contains_key(validator) {
-            return Err(ProgramError::InvalidAccountData);
-        }
-        
-        let validator_participant = self.participants.get(validator)
-            .ok_or(ProgramError::InvalidAccountData)?;
-        
-        if validator_participant.role != ConsensusRole::Validator {
-            return Err(ProgramError::InvalidAccountData);
+            return Err(ConsensusError::NotInitialized);
         }
         
         // Check if the block exists
         let block = self.blocks.get_mut(block_hash)
-            .ok_or(ProgramError::InvalidAccountData)?;
+            .ok_or_else(|| ConsensusError::BlockDoesNotExist(
+                hex::encode(*block_hash)
+            ))?;
         
-        // Check if the block is in the proposed state
+        // Check if the block can be finalized
         if block.status != BlockStatus::Proposed {
-            return Err(ProgramError::InvalidAccountData);
+            return Err(ConsensusError::InvalidBlockStatusTransition(
+                block.status.to_string(),
+                BlockStatus::Finalized.to_string()
+            ));
         }
         
-        // Update the validator's stats
-        if let Some(participant) = self.participants.get_mut(validator) {
-            participant.blocks_validated += 1;
-            participant.last_active = block.timestamp;
+        // Check if the challenge period has expired
+        if current_time < block.challenge_deadline {
+            return Err(ConsensusError::ChallengePeriodNotExpired(
+                hex::encode(*block_hash),
+                block.challenge_deadline,
+                current_time
+            ));
         }
         
-        msg!("Block validated: {:?}", block_hash);
+        // Update the block status
+        block.status = BlockStatus::Finalized;
+        
+        // Update the latest finalized block
+        self.latest_finalized_block = Some(*block_hash);
+        
+        // Update the validator stats
+        for validator in &self.active_validators {
+            if let Some(participant) = self.participants.get_mut(validator) {
+                participant.blocks_validated += 1;
+                participant.last_active = current_time;
+            }
+        }
+        
+        msg!("Block finalized: number {}, hash {}", block.number, hex::encode(*block_hash));
         
         Ok(())
     }
@@ -686,198 +966,203 @@ impl EnhancedConsensus {
         &mut self,
         challenger: &Pubkey,
         block_hash: &[u8; 32],
-        challenge_data: &[u8],
-    ) -> ProgramResult {
+        current_time: u64,
+        evidence: &[u8],
+    ) -> Result<(), ConsensusError> {
         if !self.initialized {
-            return Err(ProgramError::UninitializedAccount);
+            return Err(ConsensusError::NotInitialized);
         }
         
-        // Check if the challenger is registered
-        if !self.participants.contains_key(challenger) {
-            return Err(ProgramError::InvalidAccountData);
-        }
+        // Check if the challenger is a valid challenger or validator
+        let participant = self.participants.get(challenger)
+            .ok_or_else(|| ConsensusError::ParticipantDoesNotExist(
+                format!("{:?}", challenger)
+            ))?;
         
-        let challenger_participant = self.participants.get(challenger)
-            .ok_or(ProgramError::InvalidAccountData)?;
+        let is_challenger = participant.role == ConsensusRole::Challenger;
+        let is_validator = participant.role == ConsensusRole::Validator;
         
-        if challenger_participant.role != ConsensusRole::Challenger {
-            return Err(ProgramError::InvalidAccountData);
+        if !is_challenger && !is_validator {
+            return Err(ConsensusError::InvalidRole(
+                "Challenger or Validator".to_string(),
+                participant.role.to_string()
+            ));
         }
         
         // Check if the block exists
         let block = self.blocks.get_mut(block_hash)
-            .ok_or(ProgramError::InvalidAccountData)?;
+            .ok_or_else(|| ConsensusError::BlockDoesNotExist(
+                hex::encode(*block_hash)
+            ))?;
         
-        // Check if the block is in the proposed state
+        // Check if the block can be challenged
         if block.status != BlockStatus::Proposed {
-            return Err(ProgramError::InvalidAccountData);
+            return Err(ConsensusError::InvalidBlockStatusTransition(
+                block.status.to_string(),
+                BlockStatus::Challenged.to_string()
+            ));
         }
         
-        // Check if the challenge deadline has passed
-        if block.challenge_deadline < block.timestamp {
-            return Err(ProgramError::InvalidAccountData);
+        // Check if the challenge period has expired
+        if current_time >= block.challenge_deadline {
+            return Err(ConsensusError::ChallengePeriodExpired(
+                hex::encode(*block_hash),
+                block.challenge_deadline,
+                current_time
+            ));
         }
         
-        // Add the challenger to the block's challenges
-        block.challenges.push(*challenger);
+        // In a real implementation, we would verify the evidence here
+        // For now, we'll just accept the challenge
         
         // Update the block status
         block.status = BlockStatus::Challenged;
         
-        msg!("Block challenged: {:?}", block_hash);
+        // Add the challenger to the list of challengers
+        block.challenges.push(*challenger);
         
-        Ok(())
-    }
-    
-    /// Finalize a block
-    pub fn finalize_block(&mut self, block_hash: &[u8; 32]) -> ProgramResult {
-        if !self.initialized {
-            return Err(ProgramError::UninitializedAccount);
+        // Update the challenger stats
+        if let Some(participant) = self.participants.get_mut(challenger) {
+            participant.successful_challenges += 1;
+            participant.last_active = current_time;
+            
+            // Increase the reputation
+            participant.reputation += 10;
         }
         
-        // Check if the block exists
-        let block = self.blocks.get_mut(block_hash)
-            .ok_or(ProgramError::InvalidAccountData)?;
-        
-        // Check if the block is in the proposed state
-        if block.status != BlockStatus::Proposed {
-            return Err(ProgramError::InvalidAccountData);
-        }
-        
-        // Check if the challenge deadline has passed
-        if block.challenge_deadline >= block.timestamp {
-            return Err(ProgramError::InvalidAccountData);
-        }
-        
-        // Update the block status
-        block.status = BlockStatus::Finalized;
-        
-        // Update the latest finalized block
-        self.latest_finalized_block = Some(*block_hash);
-        
-        // Reward the sequencer
-        if self.config.enable_rewards {
-            if let Some(participant) = self.participants.get_mut(&block.sequencer) {
-                participant.reputation += 1;
+        // If slashing is enabled, slash the sequencer
+        if self.config.enable_slashing {
+            if let Some(sequencer_participant) = self.participants.get_mut(&block.sequencer) {
+                let slash_amount = (sequencer_participant.stake * self.config.parameters.slashing_percentage as u64) / 10000;
+                sequencer_participant.stake = sequencer_participant.stake.saturating_sub(slash_amount);
+                
+                // Decrease the reputation
+                sequencer_participant.reputation -= 20;
+                
+                msg!("Sequencer {:?} slashed: {} ({}%)", 
+                     block.sequencer, slash_amount, self.config.parameters.slashing_percentage / 100);
             }
-        }
-        
-        // If using PBS, reward the builder and proposer
-        if self.config.use_pbs && self.config.enable_rewards {
-            if let Some(builder_key) = block.builder {
-                if let Some(participant) = self.participants.get_mut(&builder_key) {
-                    participant.reputation += 1;
+            
+            // If using PBS and a builder was specified, slash the builder as well
+            if let Some(builder) = block.builder {
+                if let Some(builder_participant) = self.participants.get_mut(&builder) {
+                    let slash_amount = (builder_participant.stake * self.config.parameters.slashing_percentage as u64) / 10000;
+                    builder_participant.stake = builder_participant.stake.saturating_sub(slash_amount);
+                    
+                    // Decrease the reputation
+                    builder_participant.reputation -= 20;
+                    
+                    msg!("Builder {:?} slashed: {} ({}%)", 
+                         builder, slash_amount, self.config.parameters.slashing_percentage / 100);
                 }
             }
             
-            if let Some(proposer_key) = block.proposer {
-                if let Some(participant) = self.participants.get_mut(&proposer_key) {
-                    participant.reputation += 1;
+            // If using PBS and a proposer was specified, slash the proposer as well
+            if let Some(proposer) = block.proposer {
+                if let Some(proposer_participant) = self.participants.get_mut(&proposer) {
+                    let slash_amount = (proposer_participant.stake * self.config.parameters.slashing_percentage as u64) / 10000;
+                    proposer_participant.stake = proposer_participant.stake.saturating_sub(slash_amount);
+                    
+                    // Decrease the reputation
+                    proposer_participant.reputation -= 20;
+                    
+                    msg!("Proposer {:?} slashed: {} ({}%)", 
+                         proposer, slash_amount, self.config.parameters.slashing_percentage / 100);
                 }
             }
         }
         
-        msg!("Block finalized: {:?}", block_hash);
+        msg!("Block challenged: number {}, hash {}, challenger {:?}", 
+             block.number, hex::encode(*block_hash), challenger);
         
         Ok(())
     }
     
-    /// Reject a block
-    pub fn reject_block(&mut self, block_hash: &[u8; 32]) -> ProgramResult {
+    /// Reject a challenged block
+    pub fn reject_block(&mut self, block_hash: &[u8; 32]) -> Result<(), ConsensusError> {
         if !self.initialized {
-            return Err(ProgramError::UninitializedAccount);
+            return Err(ConsensusError::NotInitialized);
         }
         
         // Check if the block exists
         let block = self.blocks.get_mut(block_hash)
-            .ok_or(ProgramError::InvalidAccountData)?;
+            .ok_or_else(|| ConsensusError::BlockDoesNotExist(
+                hex::encode(*block_hash)
+            ))?;
         
-        // Check if the block is in the challenged state
+        // Check if the block can be rejected
         if block.status != BlockStatus::Challenged {
-            return Err(ProgramError::InvalidAccountData);
+            return Err(ConsensusError::InvalidBlockStatusTransition(
+                block.status.to_string(),
+                BlockStatus::Rejected.to_string()
+            ));
         }
         
         // Update the block status
         block.status = BlockStatus::Rejected;
         
-        // Slash the sequencer
-        if self.config.enable_slashing {
-            if let Some(participant) = self.participants.get_mut(&block.sequencer) {
-                participant.reputation -= 10;
-                
-                // Calculate the slashing amount
-                let slashing_amount = (participant.stake * self.config.parameters.slashing_percentage as u64) / 10_000;
-                
-                // Slash the stake
-                participant.stake = participant.stake.saturating_sub(slashing_amount);
-            }
-        }
-        
-        // If using PBS, slash the builder and proposer
-        if self.config.use_pbs && self.config.enable_slashing {
-            if let Some(builder_key) = block.builder {
-                if let Some(participant) = self.participants.get_mut(&builder_key) {
-                    participant.reputation -= 5;
-                    
-                    // Calculate the slashing amount
-                    let slashing_amount = (participant.stake * self.config.parameters.slashing_percentage as u64) / 10_000;
-                    
-                    // Slash the stake
-                    participant.stake = participant.stake.saturating_sub(slashing_amount);
-                }
-            }
-            
-            if let Some(proposer_key) = block.proposer {
-                if let Some(participant) = self.participants.get_mut(&proposer_key) {
-                    participant.reputation -= 5;
-                    
-                    // Calculate the slashing amount
-                    let slashing_amount = (participant.stake * self.config.parameters.slashing_percentage as u64) / 10_000;
-                    
-                    // Slash the stake
-                    participant.stake = participant.stake.saturating_sub(slashing_amount);
-                }
-            }
-        }
-        
-        // Reward the challengers
-        if self.config.enable_rewards {
-            for challenger in &block.challenges {
-                if let Some(participant) = self.participants.get_mut(challenger) {
-                    participant.reputation += 5;
-                    participant.successful_challenges += 1;
-                    
-                    // Calculate the reward amount
-                    let reward_amount = (participant.stake * self.config.parameters.reward_percentage as u64) / 10_000;
-                    
-                    // Add the reward
-                    participant.stake = participant.stake.saturating_add(reward_amount);
-                }
-            }
-        }
-        
-        msg!("Block rejected: {:?}", block_hash);
+        msg!("Block rejected: number {}, hash {}", block.number, hex::encode(*block_hash));
         
         Ok(())
     }
     
-    /// Verify a transaction
-    pub fn verify_transaction(&self, transaction_data: &[u8]) -> ProgramResult {
+    /// Get the current sequencer
+    pub fn get_current_sequencer(&self) -> Result<Pubkey, ConsensusError> {
         if !self.initialized {
-            return Err(ProgramError::UninitializedAccount);
+            return Err(ConsensusError::NotInitialized);
         }
         
-        // In a real implementation, we would verify the transaction against the consensus rules
-        // For now, we'll just return Ok
+        self.current_sequencer
+            .ok_or_else(|| ConsensusError::NoActiveSequencers)
+    }
+    
+    /// Get a block by hash
+    pub fn get_block(&self, block_hash: &[u8; 32]) -> Result<&Block, ConsensusError> {
+        if !self.initialized {
+            return Err(ConsensusError::NotInitialized);
+        }
         
-        Ok(())
+        self.blocks.get(block_hash)
+            .ok_or_else(|| ConsensusError::BlockDoesNotExist(
+                hex::encode(*block_hash)
+            ))
+    }
+    
+    /// Get the latest finalized block
+    pub fn get_latest_finalized_block(&self) -> Result<&Block, ConsensusError> {
+        if !self.initialized {
+            return Err(ConsensusError::NotInitialized);
+        }
+        
+        let block_hash = self.latest_finalized_block
+            .ok_or_else(|| ConsensusError::GenericError("No finalized blocks".to_string()))?;
+        
+        self.blocks.get(&block_hash)
+            .ok_or_else(|| ConsensusError::BlockDoesNotExist(
+                hex::encode(block_hash)
+            ))
+    }
+    
+    /// Get a participant by public key
+    pub fn get_participant(&self, pubkey: &Pubkey) -> Result<&ConsensusParticipant, ConsensusError> {
+        if !self.initialized {
+            return Err(ConsensusError::NotInitialized);
+        }
+        
+        self.participants.get(pubkey)
+            .ok_or_else(|| ConsensusError::ParticipantDoesNotExist(
+                format!("{:?}", pubkey)
+            ))
     }
     
     /// Update the consensus configuration
-    pub fn update_config(&mut self, config: ConsensusConfig) -> ProgramResult {
+    pub fn update_config(&mut self, config: ConsensusConfig) -> Result<(), ConsensusError> {
         if !self.initialized {
-            return Err(ProgramError::UninitializedAccount);
+            return Err(ConsensusError::NotInitialized);
         }
+        
+        // Validate the new configuration
+        config.validate()?;
         
         // Update the configuration
         self.config = config;
@@ -886,38 +1171,6 @@ impl EnhancedConsensus {
         
         Ok(())
     }
-    
-    /// Get the current sequencer
-    pub fn get_current_sequencer(&self) -> Option<Pubkey> {
-        self.current_sequencer
-    }
-    
-    /// Get the latest finalized block
-    pub fn get_latest_finalized_block(&self) -> Option<[u8; 32]> {
-        self.latest_finalized_block
-    }
-    
-    /// Get a block by hash
-    pub fn get_block(&self, block_hash: &[u8; 32]) -> Option<&Block> {
-        self.blocks.get(block_hash)
-    }
-    
-    /// Get a participant by public key
-    pub fn get_participant(&self, pubkey: &Pubkey) -> Option<&ConsensusParticipant> {
-        self.participants.get(pubkey)
-    }
-    
-    /// Calculate the hash of a block
-    fn calculate_block_hash(block: &Block) -> [u8; 32] {
-        // In a real implementation, we would calculate the hash of the block
-        // For now, we'll just return a dummy hash
-        let mut hash = [0; 32];
-        hash[0] = (block.number & 0xFF) as u8;
-        hash[1] = ((block.number >> 8) & 0xFF) as u8;
-        hash[2] = ((block.number >> 16) & 0xFF) as u8;
-        hash[3] = ((block.number >> 24) & 0xFF) as u8;
-        hash
-    }
 }
 
 #[cfg(test)]
@@ -925,19 +1178,90 @@ mod tests {
     use super::*;
     
     #[test]
-    fn test_enhanced_consensus_creation() {
-        let consensus = EnhancedConsensus::new();
-        assert!(!consensus.is_initialized());
-        assert_eq!(consensus.get_current_sequencer(), None);
-        assert_eq!(consensus.get_latest_finalized_block(), None);
+    fn test_consensus_config_validation() {
+        // Valid configuration
+        let valid_config = ConsensusConfig::default();
+        assert!(valid_config.validate().is_ok());
+        
+        // Invalid configuration (min_sequencer_stake = 0)
+        let mut invalid_config = ConsensusConfig::default();
+        invalid_config.parameters.min_sequencer_stake = 0;
+        assert!(invalid_config.validate().is_err());
+        
+        // Invalid configuration (min_validator_stake = 0)
+        let mut invalid_config = ConsensusConfig::default();
+        invalid_config.parameters.min_validator_stake = 0;
+        assert!(invalid_config.validate().is_err());
+        
+        // Invalid configuration (min_builder_stake = 0 with PBS enabled)
+        let mut invalid_config = ConsensusConfig::default();
+        invalid_config.use_pbs = true;
+        invalid_config.parameters.min_builder_stake = 0;
+        assert!(invalid_config.validate().is_err());
+        
+        // Invalid configuration (min_proposer_stake = 0 with PBS enabled)
+        let mut invalid_config = ConsensusConfig::default();
+        invalid_config.use_pbs = true;
+        invalid_config.parameters.min_proposer_stake = 0;
+        assert!(invalid_config.validate().is_err());
+        
+        // Invalid configuration (max_sequencers = 0)
+        let mut invalid_config = ConsensusConfig::default();
+        invalid_config.parameters.max_sequencers = 0;
+        assert!(invalid_config.validate().is_err());
+        
+        // Invalid configuration (max_validators = 0)
+        let mut invalid_config = ConsensusConfig::default();
+        invalid_config.parameters.max_validators = 0;
+        assert!(invalid_config.validate().is_err());
+        
+        // Invalid configuration (max_builders = 0 with PBS enabled)
+        let mut invalid_config = ConsensusConfig::default();
+        invalid_config.use_pbs = true;
+        invalid_config.parameters.max_builders = 0;
+        assert!(invalid_config.validate().is_err());
+        
+        // Invalid configuration (max_proposers = 0 with PBS enabled)
+        let mut invalid_config = ConsensusConfig::default();
+        invalid_config.use_pbs = true;
+        invalid_config.parameters.max_proposers = 0;
+        assert!(invalid_config.validate().is_err());
+        
+        // Invalid configuration (sequencer_rotation_interval = 0 with rotation enabled)
+        let mut invalid_config = ConsensusConfig::default();
+        invalid_config.enable_sequencer_rotation = true;
+        invalid_config.parameters.sequencer_rotation_interval = 0;
+        assert!(invalid_config.validate().is_err());
+        
+        // Invalid configuration (challenge_period = 0)
+        let mut invalid_config = ConsensusConfig::default();
+        invalid_config.parameters.challenge_period = 0;
+        assert!(invalid_config.validate().is_err());
+        
+        // Invalid configuration (slashing_percentage = 0 with slashing enabled)
+        let mut invalid_config = ConsensusConfig::default();
+        invalid_config.enable_slashing = true;
+        invalid_config.parameters.slashing_percentage = 0;
+        assert!(invalid_config.validate().is_err());
+        
+        // Invalid configuration (slashing_percentage > 10000 with slashing enabled)
+        let mut invalid_config = ConsensusConfig::default();
+        invalid_config.enable_slashing = true;
+        invalid_config.parameters.slashing_percentage = 12000;
+        assert!(invalid_config.validate().is_err());
+        
+        // Invalid configuration (reward_percentage = 0 with rewards enabled)
+        let mut invalid_config = ConsensusConfig::default();
+        invalid_config.enable_rewards = true;
+        invalid_config.parameters.reward_percentage = 0;
+        assert!(invalid_config.validate().is_err());
+        
+        // Invalid configuration (reward_percentage > 10000 with rewards enabled)
+        let mut invalid_config = ConsensusConfig::default();
+        invalid_config.enable_rewards = true;
+        invalid_config.parameters.reward_percentage = 12000;
+        assert!(invalid_config.validate().is_err());
     }
     
-    #[test]
-    fn test_enhanced_consensus_with_config() {
-        let config = ConsensusConfig::default();
-        let consensus = EnhancedConsensus::with_config(config);
-        assert!(!consensus.is_initialized());
-        assert_eq!(consensus.get_current_sequencer(), None);
-        assert_eq!(consensus.get_latest_finalized_block(), None);
-    }
+    // Additional tests would be implemented here
 }

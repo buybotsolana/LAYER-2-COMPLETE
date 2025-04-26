@@ -1,312 +1,396 @@
-// src/utils/concurrent_executor.rs
-//! Concurrent Executor implementation for Layer-2 on Solana
-//! 
-//! This module provides a concurrent execution system for parallel processing
-//! of independent tasks, improving throughput and resource utilization.
-
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::thread::JoinHandle;
+use std::sync::mpsc::{channel, Sender, Receiver};
 use std::collections::VecDeque;
 
-/// Task status
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskStatus {
-    /// Task is queued
-    Queued,
-    
-    /// Task is running
-    Running,
-    
-    /// Task completed successfully
-    Completed,
-    
-    /// Task failed
-    Failed,
-}
-
-/// Task result
-#[derive(Debug, Clone)]
-pub struct TaskResult<T> {
-    /// Task ID
-    pub id: u64,
-    
-    /// Task status
-    pub status: TaskStatus,
-    
-    /// Task result (if completed)
-    pub result: Option<T>,
-    
-    /// Error message (if failed)
-    pub error: Option<String>,
-    
-    /// Processing time
-    pub processing_time: Duration,
-}
-
-/// Task definition
-struct Task<F, T> {
-    /// Task ID
-    id: u64,
-    
-    /// Task function
-    func: F,
-    
-    /// Task start time
-    start_time: Option<Instant>,
-}
-
-/// Concurrent executor for parallel task processing
-pub struct ConcurrentExecutor<T> {
-    /// Next task ID
-    next_id: Arc<Mutex<u64>>,
-    
-    /// Task queue
-    task_queue: Arc<Mutex<VecDeque<u64>>>,
-    
-    /// Task results
-    results: Arc<Mutex<Vec<TaskResult<T>>>>,
-    
-    /// Number of worker threads
+/**
+ * Esecutore concorrente per elaborazione parallela
+ * 
+ * Questa classe fornisce un pool di thread per eseguire task in parallelo,
+ * migliorando significativamente le prestazioni per operazioni che possono
+ * essere parallelizzate.
+ * 
+ * @author Manus
+ */
+pub struct ConcurrentExecutor {
+    /// Numero di worker thread
     num_workers: usize,
     
-    /// Worker threads
-    workers: Vec<thread::JoinHandle<()>>,
+    /// Canale per inviare task ai worker
+    task_sender: Option<Sender<Task>>,
     
-    /// Shutdown flag
-    shutdown: Arc<Mutex<bool>>,
+    /// Worker thread
+    workers: Vec<JoinHandle<()>>,
+    
+    /// Flag per indicare se l'esecutore è in esecuzione
+    running: Arc<Mutex<bool>>,
+    
+    /// Contatore di task completati
+    completed_tasks: Arc<Mutex<usize>>,
+    
+    /// Contatore di task falliti
+    failed_tasks: Arc<Mutex<usize>>,
+    
+    /// Coda di task in attesa
+    pending_tasks: Arc<Mutex<VecDeque<Task>>>,
 }
 
-impl<T: Send + 'static> ConcurrentExecutor<T> {
-    /// Create a new concurrent executor with the specified number of worker threads
-    pub fn new(num_workers: usize) -> Self {
-        let next_id = Arc::new(Mutex::new(1));
-        let task_queue = Arc::new(Mutex::new(VecDeque::new()));
-        let results = Arc::new(Mutex::new(Vec::new()));
-        let shutdown = Arc::new(Mutex::new(false));
+/// Tipo di funzione per i task
+type TaskFn = Box<dyn FnOnce() -> Result<(), String> + Send + 'static>;
+
+/// Struttura per rappresentare un task
+struct Task {
+    /// Funzione da eseguire
+    function: TaskFn,
+    
+    /// Nome del task (per logging)
+    name: String,
+    
+    /// Priorità del task (più basso = più alta priorità)
+    priority: u8,
+}
+
+impl ConcurrentExecutor {
+    /**
+     * Crea un nuovo esecutore concorrente
+     * 
+     * @param num_workers Numero di worker thread (default: numero di core CPU)
+     * @return Nuovo esecutore concorrente
+     */
+    pub fn new(num_workers: Option<usize>) -> Self {
+        let num_workers = num_workers.unwrap_or_else(|| {
+            // Usa il numero di core CPU come default
+            num_cpus::get()
+        });
         
+        let running = Arc::new(Mutex::new(true));
+        let completed_tasks = Arc::new(Mutex::new(0));
+        let failed_tasks = Arc::new(Mutex::new(0));
+        let pending_tasks = Arc::new(Mutex::new(VecDeque::new()));
+        
+        // Crea il canale per i task
+        let (task_sender, task_receiver) = channel::<Task>();
+        
+        // Crea i worker thread
         let mut workers = Vec::with_capacity(num_workers);
         
-        for _ in 0..num_workers {
-            let task_queue = Arc::clone(&task_queue);
-            let results = Arc::clone(&results);
-            let shutdown = Arc::clone(&shutdown);
+        for id in 0..num_workers {
+            let task_receiver = task_receiver.clone();
+            let running = Arc::clone(&running);
+            let completed_tasks = Arc::clone(&completed_tasks);
+            let failed_tasks = Arc::clone(&failed_tasks);
             
             let worker = thread::spawn(move || {
-                loop {
-                    // Check if we should shut down
-                    if *shutdown.lock().unwrap() {
-                        break;
-                    }
-                    
-                    // Try to get a task from the queue
-                    let task_id = {
-                        let mut queue = task_queue.lock().unwrap();
-                        queue.pop_front()
-                    };
-                    
-                    if let Some(id) = task_id {
-                        // Process the task
-                        // In a real implementation, we would retrieve the task function and execute it
-                        // For now, we just simulate task execution
-                        thread::sleep(Duration::from_millis(100));
-                        
-                        // Add a dummy result
-                        let result = TaskResult {
-                            id,
-                            status: TaskStatus::Completed,
-                            result: None,
-                            error: None,
-                            processing_time: Duration::from_millis(100),
-                        };
-                        
-                        let mut results = results.lock().unwrap();
-                        results.push(result);
-                    } else {
-                        // No tasks in the queue, sleep for a bit
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                }
+                Self::worker_loop(id, task_receiver, running, completed_tasks, failed_tasks);
             });
             
             workers.push(worker);
         }
         
-        Self {
-            next_id,
-            task_queue,
-            results,
+        ConcurrentExecutor {
             num_workers,
+            task_sender: Some(task_sender),
             workers,
-            shutdown,
+            running,
+            completed_tasks,
+            failed_tasks,
+            pending_tasks,
         }
     }
     
-    /// Submit a task for execution
-    pub fn submit<F>(&self, func: F) -> u64
-    where
-        F: FnOnce() -> Result<T, String> + Send + 'static
+    /**
+     * Loop principale del worker
+     */
+    fn worker_loop(
+        id: usize,
+        task_receiver: Receiver<Task>,
+        running: Arc<Mutex<bool>>,
+        completed_tasks: Arc<Mutex<usize>>,
+        failed_tasks: Arc<Mutex<usize>>,
+    ) {
+        println!("Worker {} started", id);
+        
+        while *running.lock().unwrap() {
+            // Ricevi un task dal canale
+            match task_receiver.recv() {
+                Ok(task) => {
+                    println!("Worker {} executing task: {}", id, task.name);
+                    
+                    // Esegui il task
+                    match (task.function)() {
+                        Ok(()) => {
+                            // Task completato con successo
+                            let mut completed = completed_tasks.lock().unwrap();
+                            *completed += 1;
+                            println!("Worker {} completed task: {}", id, task.name);
+                        }
+                        Err(err) => {
+                            // Task fallito
+                            let mut failed = failed_tasks.lock().unwrap();
+                            *failed += 1;
+                            println!("Worker {} failed task: {} - Error: {}", id, task.name, err);
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Canale chiuso, termina il worker
+                    break;
+                }
+            }
+        }
+        
+        println!("Worker {} stopped", id);
+    }
+    
+    /**
+     * Aggiunge un task all'esecutore
+     * 
+     * @param name Nome del task
+     * @param priority Priorità del task (più basso = più alta priorità)
+     * @param function Funzione da eseguire
+     * @return true se il task è stato aggiunto con successo, false altrimenti
+     */
+    pub fn submit<F>(&self, name: &str, priority: u8, function: F) -> bool 
+    where 
+        F: FnOnce() -> Result<(), String> + Send + 'static
     {
-        // Get a new task ID
-        let id = {
-            let mut next_id = self.next_id.lock().unwrap();
-            let id = *next_id;
-            *next_id += 1;
-            id
-        };
+        if let Some(sender) = &self.task_sender {
+            let task = Task {
+                function: Box::new(function),
+                name: name.to_string(),
+                priority,
+            };
+            
+            // Aggiungi il task alla coda in attesa
+            {
+                let mut pending = self.pending_tasks.lock().unwrap();
+                pending.push_back(task);
+            }
+            
+            // Invia il task al worker
+            match sender.send(task) {
+                Ok(_) => true,
+                Err(_) => {
+                    println!("Failed to submit task: {}", name);
+                    false
+                }
+            }
+        } else {
+            println!("Executor is not running");
+            false
+        }
+    }
+    
+    /**
+     * Aggiunge un batch di task all'esecutore
+     * 
+     * @param tasks Vector di tuple (nome, priorità, funzione)
+     * @return Numero di task aggiunti con successo
+     */
+    pub fn submit_batch<F>(&self, tasks: Vec<(&str, u8, F)>) -> usize 
+    where 
+        F: FnOnce() -> Result<(), String> + Send + 'static + Clone
+    {
+        let mut successful = 0;
         
-        // Add the task to the queue
-        {
-            let mut queue = self.task_queue.lock().unwrap();
-            queue.push_back(id);
+        for (name, priority, function) in tasks {
+            if self.submit(name, priority, function) {
+                successful += 1;
+            }
         }
         
-        // Add a placeholder result
-        {
-            let mut results = self.results.lock().unwrap();
-            results.push(TaskResult {
-                id,
-                status: TaskStatus::Queued,
-                result: None,
-                error: None,
-                processing_time: Duration::from_secs(0),
-            });
-        }
-        
-        id
+        successful
     }
     
-    /// Get the status of a task
-    pub fn get_task_status(&self, id: u64) -> Option<TaskStatus> {
-        let results = self.results.lock().unwrap();
-        results.iter()
-            .find(|result| result.id == id)
-            .map(|result| result.status)
-    }
-    
-    /// Get the result of a task
-    pub fn get_task_result(&self, id: u64) -> Option<TaskResult<T>> where T: Clone {
-        let results = self.results.lock().unwrap();
-        results.iter()
-            .find(|result| result.id == id)
-            .cloned()
-    }
-    
-    /// Wait for a task to complete
-    pub fn wait_for_task(&self, id: u64, timeout: Duration) -> Option<TaskResult<T>> where T: Clone {
-        let start = Instant::now();
+    /**
+     * Attende il completamento di tutti i task
+     * 
+     * @param timeout_ms Timeout in millisecondi (None = attesa infinita)
+     * @return true se tutti i task sono stati completati, false se è scaduto il timeout
+     */
+    pub fn wait_for_completion(&self, timeout_ms: Option<u64>) -> bool {
+        let start_time = std::time::Instant::now();
         
         loop {
-            if let Some(result) = self.get_task_result(id) {
-                if result.status == TaskStatus::Completed || result.status == TaskStatus::Failed {
-                    return Some(result);
+            // Controlla se ci sono task in attesa
+            let pending_count = {
+                let pending = self.pending_tasks.lock().unwrap();
+                pending.len()
+            };
+            
+            if pending_count == 0 {
+                return true;
+            }
+            
+            // Controlla se è scaduto il timeout
+            if let Some(timeout) = timeout_ms {
+                if start_time.elapsed().as_millis() > timeout as u128 {
+                    return false;
                 }
             }
             
-            if start.elapsed() > timeout {
-                return None;
-            }
-            
-            thread::sleep(Duration::from_millis(10));
+            // Attendi un po' prima di controllare di nuovo
+            thread::sleep(std::time::Duration::from_millis(10));
         }
     }
     
-    /// Wait for all tasks to complete
-    pub fn wait_for_all(&self, timeout: Duration) -> Vec<TaskResult<T>> where T: Clone {
-        let start = Instant::now();
-        
-        loop {
-            let results = self.results.lock().unwrap();
-            let all_done = results.iter()
-                .all(|result| result.status == TaskStatus::Completed || result.status == TaskStatus::Failed);
-            
-            if all_done {
-                return results.clone();
-            }
-            
-            if start.elapsed() > timeout {
-                return results.clone();
-            }
-            
-            drop(results);
-            thread::sleep(Duration::from_millis(10));
-        }
-    }
-    
-    /// Get the number of queued tasks
-    pub fn get_queued_count(&self) -> usize {
-        self.task_queue.lock().unwrap().len()
-    }
-    
-    /// Get the number of completed tasks
-    pub fn get_completed_count(&self) -> usize {
-        let results = self.results.lock().unwrap();
-        results.iter()
-            .filter(|result| result.status == TaskStatus::Completed)
-            .count()
-    }
-    
-    /// Get the number of failed tasks
-    pub fn get_failed_count(&self) -> usize {
-        let results = self.results.lock().unwrap();
-        results.iter()
-            .filter(|result| result.status == TaskStatus::Failed)
-            .count()
-    }
-    
-    /// Clear completed and failed tasks to free memory
-    pub fn clear_completed(&self) {
-        let mut results = self.results.lock().unwrap();
-        results.retain(|result| result.status == TaskStatus::Queued || result.status == TaskStatus::Running);
-    }
-    
-    /// Shut down the executor
-    pub fn shutdown(self) {
-        // Set the shutdown flag
+    /**
+     * Arresta l'esecutore
+     */
+    pub fn shutdown(&mut self) {
+        // Imposta il flag running a false
         {
-            let mut shutdown = self.shutdown.lock().unwrap();
-            *shutdown = true;
+            let mut running = self.running.lock().unwrap();
+            *running = false;
         }
         
-        // Wait for all workers to finish
-        for worker in self.workers {
+        // Chiudi il canale dei task
+        self.task_sender.take();
+        
+        // Attendi che i worker terminino
+        while let Some(worker) = self.workers.pop() {
             let _ = worker.join();
         }
+        
+        println!("Executor shutdown complete");
+    }
+    
+    /**
+     * Ottiene il numero di task completati
+     * 
+     * @return Numero di task completati
+     */
+    pub fn get_completed_tasks(&self) -> usize {
+        let completed = self.completed_tasks.lock().unwrap();
+        *completed
+    }
+    
+    /**
+     * Ottiene il numero di task falliti
+     * 
+     * @return Numero di task falliti
+     */
+    pub fn get_failed_tasks(&self) -> usize {
+        let failed = self.failed_tasks.lock().unwrap();
+        *failed
+    }
+    
+    /**
+     * Ottiene il numero di task in attesa
+     * 
+     * @return Numero di task in attesa
+     */
+    pub fn get_pending_tasks(&self) -> usize {
+        let pending = self.pending_tasks.lock().unwrap();
+        pending.len()
+    }
+    
+    /**
+     * Ottiene il numero di worker
+     * 
+     * @return Numero di worker
+     */
+    pub fn get_num_workers(&self) -> usize {
+        self.num_workers
     }
 }
 
-impl<T> Drop for ConcurrentExecutor<T> {
+impl Drop for ConcurrentExecutor {
     fn drop(&mut self) {
-        // Set the shutdown flag
-        {
-            let mut shutdown = self.shutdown.lock().unwrap();
-            *shutdown = true;
-        }
+        self.shutdown();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
     
     #[test]
     fn test_concurrent_executor() {
-        // Create a concurrent executor with 4 worker threads
-        let executor = ConcurrentExecutor::<i32>::new(4);
+        // Crea un esecutore con 4 worker
+        let executor = ConcurrentExecutor::new(Some(4));
         
-        // Submit some tasks
-        let id1 = executor.submit(|| Ok(42));
-        let id2 = executor.submit(|| Err("Task failed".to_string()));
+        // Contatore atomico per i task completati
+        let counter = Arc::new(AtomicUsize::new(0));
         
-        // Wait for tasks to complete
-        let result1 = executor.wait_for_task(id1, Duration::from_secs(1));
-        let result2 = executor.wait_for_task(id2, Duration::from_secs(1));
+        // Aggiungi 10 task
+        for i in 0..10 {
+            let counter_clone = Arc::clone(&counter);
+            executor.submit(&format!("Task {}", i), 0, move || {
+                // Simula un'operazione che richiede tempo
+                thread::sleep(Duration::from_millis(100));
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
+        }
         
-        // Check results
-        assert!(result1.is_some());
-        assert!(result2.is_some());
+        // Attendi il completamento di tutti i task
+        assert!(executor.wait_for_completion(Some(2000)));
         
-        // Shutdown the executor
-        executor.shutdown();
+        // Verifica che tutti i task siano stati completati
+        assert_eq!(counter.load(Ordering::SeqCst), 10);
+        assert_eq!(executor.get_completed_tasks(), 10);
+        assert_eq!(executor.get_failed_tasks(), 0);
+    }
+    
+    #[test]
+    fn test_task_failure() {
+        // Crea un esecutore con 2 worker
+        let executor = ConcurrentExecutor::new(Some(2));
+        
+        // Aggiungi un task che fallisce
+        executor.submit("Failing Task", 0, || {
+            Err("Task failed intentionally".to_string())
+        });
+        
+        // Aggiungi un task che ha successo
+        executor.submit("Successful Task", 0, || {
+            Ok(())
+        });
+        
+        // Attendi il completamento di tutti i task
+        assert!(executor.wait_for_completion(Some(1000)));
+        
+        // Verifica che un task sia fallito e uno abbia avuto successo
+        assert_eq!(executor.get_completed_tasks(), 1);
+        assert_eq!(executor.get_failed_tasks(), 1);
+    }
+    
+    #[test]
+    fn test_batch_submission() {
+        // Crea un esecutore con 2 worker
+        let executor = ConcurrentExecutor::new(Some(2));
+        
+        // Contatore atomico per i task completati
+        let counter = Arc::new(AtomicUsize::new(0));
+        
+        // Crea un batch di task
+        let mut tasks = Vec::new();
+        for i in 0..5 {
+            let counter_clone = Arc::clone(&counter);
+            tasks.push((
+                format!("Batch Task {}", i).as_str(),
+                0,
+                move || {
+                    thread::sleep(Duration::from_millis(50));
+                    counter_clone.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            ));
+        }
+        
+        // Aggiungi il batch di task
+        let submitted = executor.submit_batch(tasks);
+        assert_eq!(submitted, 5);
+        
+        // Attendi il completamento di tutti i task
+        assert!(executor.wait_for_completion(Some(1000)));
+        
+        // Verifica che tutti i task siano stati completati
+        assert_eq!(counter.load(Ordering::SeqCst), 5);
+        assert_eq!(executor.get_completed_tasks(), 5);
     }
 }

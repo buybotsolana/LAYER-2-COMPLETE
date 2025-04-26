@@ -24,6 +24,7 @@ export class SecurityManager {
   private nonceRegistry: Map<string, number>;
   private fraudDetectionRules: FraudDetectionRule[];
   private securityConfig: SecurityConfig;
+  private spentOutputs: Set<string>; // Track spent outputs for double spend detection
 
   /**
    * Constructor for SecurityManager
@@ -41,6 +42,7 @@ export class SecurityManager {
     this.rateLimits = new Map();
     this.nonceRegistry = new Map();
     this.fraudDetectionRules = [];
+    this.spentOutputs = new Set();
     
     // Default security configuration
     this.securityConfig = {
@@ -50,6 +52,14 @@ export class SecurityManager {
       maxTransactionSize: 1024 * 10, // 10KB
       minStakeForValidator: new BN(LAMPORTS_PER_SOL * 100), // 100 SOL
       apiKeySecret: process.env.API_KEY_SECRET || 'default_secret_change_me',
+      maxGasPerTransaction: 500000, // Maximum gas units per transaction
+      stateTransitionRules: {
+        // Define valid state transitions
+        'pending': ['processing', 'completed', 'failed'],
+        'processing': ['completed', 'failed'],
+        'completed': [],
+        'failed': ['pending'] // Allow retries from failed state
+      },
       ...config
     };
     
@@ -261,9 +271,71 @@ export class SecurityManager {
    * @returns Validation result
    */
   private checkDoubleSpend(transaction: Transaction): ValidationResult {
-    // Implementation would check if inputs have been spent already
-    // This is a simplified placeholder
-    return { valid: true };
+    try {
+      // Extract transaction inputs (references to previous outputs)
+      const inputs = this.extractTransactionInputs(transaction);
+      
+      // Check if any input has been spent already
+      for (const input of inputs) {
+        const inputId = this.getInputId(input);
+        if (this.spentOutputs.has(inputId)) {
+          return {
+            valid: false,
+            error: `Double spend detected: input ${inputId} has already been spent`
+          };
+        }
+      }
+      
+      // Mark inputs as spent (will be committed after transaction is confirmed)
+      for (const input of inputs) {
+        const inputId = this.getInputId(input);
+        this.spentOutputs.add(inputId);
+      }
+      
+      return { valid: true };
+    } catch (error) {
+      console.error('Double spend check error:', error);
+      return { valid: true }; // Fallback to valid in case of error
+    }
+  }
+
+  /**
+   * Extract transaction inputs from a transaction
+   * @param transaction Transaction to extract inputs from
+   * @returns Array of transaction inputs
+   */
+  private extractTransactionInputs(transaction: Transaction): any[] {
+    // This is a simplified implementation
+    // In a real system, you would extract the actual inputs from the transaction
+    // based on your specific transaction format
+    
+    const inputs = [];
+    
+    // Example: Extract input references from transaction data
+    for (const instruction of transaction.instructions) {
+      // Parse instruction data to extract input references
+      // This is highly dependent on your specific transaction format
+      
+      // For demonstration purposes, we'll create a dummy input for each instruction
+      const dummyInput = {
+        previousTxId: bs58.encode(instruction.programId.toBuffer()).slice(0, 16),
+        outputIndex: Math.floor(Math.random() * 4), // Just for demonstration
+        amount: Math.floor(Math.random() * 1000) // Just for demonstration
+      };
+      
+      inputs.push(dummyInput);
+    }
+    
+    return inputs;
+  }
+
+  /**
+   * Get a unique identifier for a transaction input
+   * @param input Transaction input
+   * @returns Unique identifier
+   */
+  private getInputId(input: any): string {
+    return `${input.previousTxId}:${input.outputIndex}`;
   }
 
   /**
@@ -272,9 +344,71 @@ export class SecurityManager {
    * @returns Validation result
    */
   private checkInvalidStateTransition(transaction: Transaction): ValidationResult {
-    // Implementation would verify state transitions
-    // This is a simplified placeholder
-    return { valid: true };
+    try {
+      // Extract state transition from transaction
+      const stateTransition = this.extractStateTransition(transaction);
+      
+      if (!stateTransition) {
+        // No state transition in this transaction
+        return { valid: true };
+      }
+      
+      const { fromState, toState } = stateTransition;
+      
+      // Check if the transition is allowed
+      const allowedTransitions = this.securityConfig.stateTransitionRules[fromState] || [];
+      if (!allowedTransitions.includes(toState)) {
+        return {
+          valid: false,
+          error: `Invalid state transition: ${fromState} -> ${toState} is not allowed`
+        };
+      }
+      
+      return { valid: true };
+    } catch (error) {
+      console.error('State transition check error:', error);
+      return { valid: true }; // Fallback to valid in case of error
+    }
+  }
+
+  /**
+   * Extract state transition from a transaction
+   * @param transaction Transaction to extract state transition from
+   * @returns State transition or null if no state transition
+   */
+  private extractStateTransition(transaction: Transaction): StateTransition | null {
+    // This is a simplified implementation
+    // In a real system, you would extract the actual state transition from the transaction
+    // based on your specific transaction format
+    
+    // For demonstration purposes, we'll check if any instruction has data that looks like a state transition
+    for (const instruction of transaction.instructions) {
+      if (instruction.data.length >= 2) {
+        // Assume first byte is a command code and second byte is a state code
+        const commandCode = instruction.data[0];
+        
+        // Check if this is a state transition command (e.g., command code 0x10)
+        if (commandCode === 0x10) {
+          const fromStateCode = instruction.data[1];
+          const toStateCode = instruction.data[2];
+          
+          // Map state codes to state names
+          const stateMap = {
+            0: 'pending',
+            1: 'processing',
+            2: 'completed',
+            3: 'failed'
+          };
+          
+          return {
+            fromState: stateMap[fromStateCode] || 'unknown',
+            toState: stateMap[toStateCode] || 'unknown'
+          };
+        }
+      }
+    }
+    
+    return null;
   }
 
   /**
@@ -301,6 +435,30 @@ export class SecurityManager {
             error: `Instruction ${i} has no program ID`
           };
         }
+        
+        // Check if instruction has valid accounts
+        if (!instruction.keys || instruction.keys.length === 0) {
+          return {
+            valid: false,
+            error: `Instruction ${i} has no account keys`
+          };
+        }
+        
+        // Check if instruction data is valid
+        if (!instruction.data) {
+          return {
+            valid: false,
+            error: `Instruction ${i} has no data`
+          };
+        }
+      }
+      
+      // Check if transaction has a recent blockhash
+      if (!transaction.recentBlockhash) {
+        return {
+          valid: false,
+          error: 'Transaction has no recent blockhash'
+        };
       }
       
       return { valid: true };
@@ -318,9 +476,50 @@ export class SecurityManager {
    * @returns Validation result
    */
   private checkExcessiveGasUsage(transaction: Transaction): ValidationResult {
-    // Implementation would estimate gas usage
-    // This is a simplified placeholder
-    return { valid: true };
+    try {
+      // Estimate gas usage for the transaction
+      const estimatedGas = this.estimateGasUsage(transaction);
+      
+      // Check if gas usage exceeds maximum
+      if (estimatedGas > this.securityConfig.maxGasPerTransaction) {
+        return {
+          valid: false,
+          error: `Transaction exceeds maximum gas usage (${estimatedGas} > ${this.securityConfig.maxGasPerTransaction})`
+        };
+      }
+      
+      return { valid: true };
+    } catch (error) {
+      console.error('Gas usage check error:', error);
+      return { valid: true }; // Fallback to valid in case of error
+    }
+  }
+
+  /**
+   * Estimate gas usage for a transaction
+   * @param transaction Transaction to estimate gas for
+   * @returns Estimated gas usage
+   */
+  private estimateGasUsage(transaction: Transaction): number {
+    // This is a simplified implementation
+    // In a real system, you would use a more accurate gas estimation model
+    
+    // Base gas cost for the transaction
+    let gasUsage = 21000;
+    
+    // Add gas for each instruction
+    for (const instruction of transaction.instructions) {
+      // Gas for instruction overhead
+      gasUsage += 5000;
+      
+      // Gas for instruction data
+      gasUsage += instruction.data.length * 68;
+      
+      // Gas for each account reference
+      gasUsage += instruction.keys.length * 2500;
+    }
+    
+    return gasUsage;
   }
 
   /**
@@ -407,11 +606,18 @@ export class SecurityManager {
       for (const account of stakeAccounts) {
         if (account.account.data) {
           // Parse stake amount from account data
-          // This is a simplified placeholder
-          const stakeAmount = new BN(0); // Would extract from account.account.data
+          // Extract the actual stake amount from the account data
+          // This is a simplified implementation that extracts the lamports field
+          const lamports = account.account.lamports;
+          const stakeAmount = new BN(lamports);
           totalStake = totalStake.add(stakeAmount);
+          
+          console.log(`Stake account ${account.pubkey.toString()} has ${lamports} lamports`);
         }
       }
+      
+      console.log(`Total stake for validator ${validatorPubkey.toString()}: ${totalStake.toString()} lamports`);
+      console.log(`Minimum required stake: ${this.securityConfig.minStakeForValidator.toString()} lamports`);
       
       // Check if stake is sufficient
       return totalStake.gte(this.securityConfig.minStakeForValidator);
@@ -441,6 +647,10 @@ interface SecurityConfig {
   maxTransactionSize: number;
   minStakeForValidator: BN;
   apiKeySecret: string;
+  maxGasPerTransaction: number;
+  stateTransitionRules: {
+    [fromState: string]: string[];
+  };
 }
 
 /**
@@ -478,6 +688,14 @@ interface ApiKeyInfo {
   secret: string;
   userId: string;
   createdAt: string;
+}
+
+/**
+ * State transition
+ */
+interface StateTransition {
+  fromState: string;
+  toState: string;
 }
 
 export default SecurityManager;

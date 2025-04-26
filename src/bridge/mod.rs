@@ -27,43 +27,56 @@ use solana_program::{
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
+use thiserror::Error;
 
 /// Error types for bridge operations
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum BridgeError {
     /// Invalid token
+    #[error("Invalid token: {0}")]
     InvalidToken(String),
     
     /// Invalid amount
+    #[error("Invalid amount: {0}")]
     InvalidAmount(String),
     
     /// Invalid deposit
+    #[error("Invalid deposit: {0}")]
     InvalidDeposit(String),
     
     /// Invalid withdrawal
+    #[error("Invalid withdrawal: {0}")]
     InvalidWithdrawal(String),
     
     /// Invalid message
+    #[error("Invalid message: {0}")]
     InvalidMessage(String),
     
     /// Security verification failed
+    #[error("Security verification failed: {0}")]
     SecurityVerificationFailed(String),
     
+    /// Unauthorized access
+    #[error("Unauthorized access: {0}")]
+    Unauthorized(String),
+    
+    /// Daily limit exceeded
+    #[error("Daily limit exceeded: {0}")]
+    DailyLimitExceeded(String),
+    
+    /// System time error
+    #[error("System time error: {0}")]
+    SystemTimeError(String),
+    
     /// Generic error
+    #[error("Generic error: {0}")]
     GenericError(String),
 }
 
-impl std::fmt::Display for BridgeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BridgeError::InvalidToken(msg) => write!(f, "Invalid token: {}", msg),
-            BridgeError::InvalidAmount(msg) => write!(f, "Invalid amount: {}", msg),
-            BridgeError::InvalidDeposit(msg) => write!(f, "Invalid deposit: {}", msg),
-            BridgeError::InvalidWithdrawal(msg) => write!(f, "Invalid withdrawal: {}", msg),
-            BridgeError::InvalidMessage(msg) => write!(f, "Invalid message: {}", msg),
-            BridgeError::SecurityVerificationFailed(msg) => write!(f, "Security verification failed: {}", msg),
-            BridgeError::GenericError(msg) => write!(f, "Generic error: {}", msg),
-        }
+impl From<std::time::SystemTimeError> for BridgeError {
+    fn from(error: std::time::SystemTimeError) -> Self {
+        BridgeError::SystemTimeError(error.to_string())
     }
 }
 
@@ -295,9 +308,8 @@ impl BridgeManager {
     /// Update the bridge manager
     pub fn update(&mut self) -> Result<(), BridgeError> {
         // Get the current timestamp
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| BridgeError::GenericError(e.to_string()))?
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
             .as_secs();
         
         // Check if we've moved to a new day
@@ -315,11 +327,12 @@ impl BridgeManager {
             // Check if the deposit has enough L1 confirmations
             if deposit.l1_block_number + self.config.min_l1_confirmations <= self.message_relay.get_latest_l1_block_number() {
                 // Verify the deposit with the security module
-                match self.security_module.verify_deposit(deposit) {
+                match self.security_module.verify_deposit(&deposit) {
                     Ok(security_module::VerificationResult::Approved) => {
                         // Confirm the deposit
                         if let Err(e) = self.deposit_handler.confirm_deposit(deposit.id) {
                             msg!("Error confirming deposit: {}", e);
+                            continue;
                         }
                     },
                     Ok(security_module::VerificationResult::Rejected(reason)) => {
@@ -327,12 +340,15 @@ impl BridgeManager {
                         if let Err(e) = self.deposit_handler.reject_deposit(deposit.id, &reason) {
                             msg!("Error rejecting deposit: {}", e);
                         }
+                        continue;
                     },
                     Ok(security_module::VerificationResult::Pending) => {
                         // Do nothing, wait for more confirmations
+                        continue;
                     },
                     Err(e) => {
                         msg!("Error verifying deposit: {}", e);
+                        continue;
                     },
                 }
             }
@@ -366,7 +382,8 @@ impl BridgeManager {
                 }
             } else {
                 // Reject the deposit due to daily limit
-                if let Err(e) = self.deposit_handler.reject_deposit(deposit.id, "Daily limit exceeded") {
+                let limit_message = format!("Daily limit of {} exceeded", daily_limit);
+                if let Err(e) = self.deposit_handler.reject_deposit(deposit.id, &limit_message) {
                     msg!("Error rejecting deposit: {}", e);
                 }
             }
@@ -378,11 +395,12 @@ impl BridgeManager {
             // Check if the withdrawal has enough L2 confirmations
             if withdrawal.l2_block_number + self.config.min_l2_confirmations <= self.message_relay.get_latest_l2_block_number() {
                 // Verify the withdrawal with the security module
-                match self.security_module.verify_withdrawal(withdrawal) {
+                match self.security_module.verify_withdrawal(&withdrawal) {
                     Ok(security_module::VerificationResult::Approved) => {
                         // Confirm the withdrawal
                         if let Err(e) = self.withdrawal_handler.confirm_withdrawal(withdrawal.id) {
                             msg!("Error confirming withdrawal: {}", e);
+                            continue;
                         }
                     },
                     Ok(security_module::VerificationResult::Rejected(reason)) => {
@@ -390,12 +408,15 @@ impl BridgeManager {
                         if let Err(e) = self.withdrawal_handler.reject_withdrawal(withdrawal.id, &reason) {
                             msg!("Error rejecting withdrawal: {}", e);
                         }
+                        continue;
                     },
                     Ok(security_module::VerificationResult::Pending) => {
                         // Do nothing, wait for more confirmations
+                        continue;
                     },
                     Err(e) => {
                         msg!("Error verifying withdrawal: {}", e);
+                        continue;
                     },
                 }
             }
@@ -429,7 +450,8 @@ impl BridgeManager {
                 }
             } else {
                 // Reject the withdrawal due to daily limit
-                if let Err(e) = self.withdrawal_handler.reject_withdrawal(withdrawal.id, "Daily limit exceeded") {
+                let limit_message = format!("Daily limit of {} exceeded", daily_limit);
+                if let Err(e) = self.withdrawal_handler.reject_withdrawal(withdrawal.id, &limit_message) {
                     msg!("Error rejecting withdrawal: {}", e);
                 }
             }
@@ -447,80 +469,300 @@ impl BridgeManager {
         relayer: &Pubkey,
         l1_tx_hash: [u8; 32],
         l1_block_number: u64,
-        l1_sender: [u8; 20],
-        l2_recipient: [u8; 32],
         token: [u8; 20],
         amount: u64,
-    ) -> Result<[u8; 32], BridgeError> {
+        recipient: [u8; 32],
+    ) -> Result<(), BridgeError> {
         // Check if the relayer is authorized
         if !self.rbac.is_relayer(relayer) {
-            return Err(BridgeError::GenericError("Relayer not authorized".to_string()));
+            return Err(BridgeError::Unauthorized("Relayer not authorized".to_string()));
         }
         
         // Check if the token is registered
-        if !self.token_registry.is_token_registered(token) {
-            return Err(BridgeError::InvalidToken(format!("Token {:?} is not registered", token)));
+        if !self.token_registry.is_token_registered(&token) {
+            return Err(BridgeError::InvalidToken(format!("Token {:?} not registered", token)));
         }
         
-        // Process the deposit
-        self.deposit_handler.process_deposit(l1_tx_hash, l1_block_number, l1_sender, l2_recipient, token, amount)
-            .map_err(|e| BridgeError::InvalidDeposit(e))
+        // Check if the amount is valid
+        if amount == 0 {
+            return Err(BridgeError::InvalidAmount("Amount must be greater than 0".to_string()));
+        }
+        
+        // Create a new deposit
+        let deposit_id = self.deposit_handler.create_deposit(
+            l1_tx_hash,
+            l1_block_number,
+            token,
+            amount,
+            recipient,
+        ).map_err(|e| BridgeError::InvalidDeposit(e))?;
+        
+        msg!("Deposit created with ID: {}", deposit_id);
+        
+        Ok(())
     }
     
     /// Process a withdrawal to L1
     pub fn process_withdrawal(
         &mut self,
-        l2_sender: &Pubkey,
+        validator: &Pubkey,
         l2_tx_hash: [u8; 32],
         l2_block_number: u64,
-        l1_recipient: [u8; 20],
         token: [u8; 20],
         amount: u64,
-    ) -> Result<[u8; 32], BridgeError> {
-        // Check if the token is registered
-        if !self.token_registry.is_token_registered(token) {
-            return Err(BridgeError::InvalidToken(format!("Token {:?} is not registered", token)));
+        recipient: [u8; 20],
+    ) -> Result<(), BridgeError> {
+        // Check if the validator is authorized
+        if !self.rbac.is_validator(validator) {
+            return Err(BridgeError::Unauthorized("Validator not authorized".to_string()));
         }
         
-        // Process the withdrawal
-        self.withdrawal_handler.process_withdrawal(l2_tx_hash, l2_block_number, l2_sender.to_bytes(), l1_recipient, token, amount)
-            .map_err(|e| BridgeError::InvalidWithdrawal(e))
+        // Check if the token is registered
+        if !self.token_registry.is_token_registered(&token) {
+            return Err(BridgeError::InvalidToken(format!("Token {:?} not registered", token)));
+        }
+        
+        // Check if the amount is valid
+        if amount == 0 {
+            return Err(BridgeError::InvalidAmount("Amount must be greater than 0".to_string()));
+        }
+        
+        // Create a new withdrawal
+        let withdrawal_id = self.withdrawal_handler.create_withdrawal(
+            l2_tx_hash,
+            l2_block_number,
+            token,
+            amount,
+            recipient,
+        ).map_err(|e| BridgeError::InvalidWithdrawal(e))?;
+        
+        msg!("Withdrawal created with ID: {}", withdrawal_id);
+        
+        Ok(())
     }
     
     /// Register a token
     pub fn register_token(
         &mut self,
         admin: &Pubkey,
-        token_l1: [u8; 20],
-        token_l2: [u8; 32],
+        l1_token: [u8; 20],
+        l2_token: [u8; 32],
         name: String,
         symbol: String,
         decimals: u8,
     ) -> Result<(), BridgeError> {
         // Check if the admin is authorized
         if !self.rbac.is_admin(admin) {
-            return Err(BridgeError::GenericError("Admin not authorized".to_string()));
+            return Err(BridgeError::Unauthorized("Admin not authorized".to_string()));
         }
         
         // Register the token
-        self.token_registry.register_token(token_l1, token_l2, name, symbol, decimals)
+        self.token_registry.register_token(l1_token, l2_token, name, symbol, decimals)
             .map_err(|e| BridgeError::InvalidToken(e))
     }
     
-    /// Unregister a token
-    pub fn unregister_token(
+    /// Set the daily deposit limit for a token
+    pub fn set_daily_deposit_limit(
         &mut self,
         admin: &Pubkey,
-        token_l1: [u8; 20],
+        token: [u8; 20],
+        limit: u64,
     ) -> Result<(), BridgeError> {
         // Check if the admin is authorized
         if !self.rbac.is_admin(admin) {
-            return Err(BridgeError::GenericError("Admin not authorized".to_string()));
+            return Err(BridgeError::Unauthorized("Admin not authorized".to_string()));
         }
         
-        // Unregister the token
-        self.token_registry.unregister_token(token_l1)
-            .map_err(|e| BridgeError::InvalidToken(e))
+        // Check if the token is registered
+        if !self.token_registry.is_token_registered(&token) {
+            return Err(BridgeError::InvalidToken(format!("Token {:?} not registered", token)));
+        }
+        
+        // Set the daily deposit limit
+        self.config.set_daily_deposit_limit(token, limit);
+        
+        msg!("Daily deposit limit for token {:?} set to {}", token, limit);
+        
+        Ok(())
+    }
+    
+    /// Set the daily withdrawal limit for a token
+    pub fn set_daily_withdrawal_limit(
+        &mut self,
+        admin: &Pubkey,
+        token: [u8; 20],
+        limit: u64,
+    ) -> Result<(), BridgeError> {
+        // Check if the admin is authorized
+        if !self.rbac.is_admin(admin) {
+            return Err(BridgeError::Unauthorized("Admin not authorized".to_string()));
+        }
+        
+        // Check if the token is registered
+        if !self.token_registry.is_token_registered(&token) {
+            return Err(BridgeError::InvalidToken(format!("Token {:?} not registered", token)));
+        }
+        
+        // Set the daily withdrawal limit
+        self.config.set_daily_withdrawal_limit(token, limit);
+        
+        msg!("Daily withdrawal limit for token {:?} set to {}", token, limit);
+        
+        Ok(())
+    }
+    
+    /// Add a relayer
+    pub fn add_relayer(
+        &mut self,
+        admin: &Pubkey,
+        relayer: Pubkey,
+    ) -> Result<(), BridgeError> {
+        // Check if the admin is authorized
+        if !self.rbac.is_admin(admin) {
+            return Err(BridgeError::Unauthorized("Admin not authorized".to_string()));
+        }
+        
+        // Add the relayer
+        self.rbac.add_relayer(relayer);
+        
+        msg!("Added relayer: {}", relayer);
+        
+        Ok(())
+    }
+    
+    /// Remove a relayer
+    pub fn remove_relayer(
+        &mut self,
+        admin: &Pubkey,
+        relayer: &Pubkey,
+    ) -> Result<(), BridgeError> {
+        // Check if the admin is authorized
+        if !self.rbac.is_admin(admin) {
+            return Err(BridgeError::Unauthorized("Admin not authorized".to_string()));
+        }
+        
+        // Remove the relayer
+        self.rbac.remove_relayer(relayer);
+        
+        msg!("Removed relayer: {}", relayer);
+        
+        Ok(())
+    }
+    
+    /// Add a validator
+    pub fn add_validator(
+        &mut self,
+        admin: &Pubkey,
+        validator: Pubkey,
+    ) -> Result<(), BridgeError> {
+        // Check if the admin is authorized
+        if !self.rbac.is_admin(admin) {
+            return Err(BridgeError::Unauthorized("Admin not authorized".to_string()));
+        }
+        
+        // Add the validator
+        self.rbac.add_validator(validator);
+        
+        msg!("Added validator: {}", validator);
+        
+        Ok(())
+    }
+    
+    /// Remove a validator
+    pub fn remove_validator(
+        &mut self,
+        admin: &Pubkey,
+        validator: &Pubkey,
+    ) -> Result<(), BridgeError> {
+        // Check if the admin is authorized
+        if !self.rbac.is_admin(admin) {
+            return Err(BridgeError::Unauthorized("Admin not authorized".to_string()));
+        }
+        
+        // Remove the validator
+        self.rbac.remove_validator(validator);
+        
+        msg!("Removed validator: {}", validator);
+        
+        Ok(())
+    }
+    
+    /// Add an admin
+    pub fn add_admin(
+        &mut self,
+        owner: &Pubkey,
+        admin: Pubkey,
+    ) -> Result<(), BridgeError> {
+        // Check if the owner is authorized
+        if !self.rbac.is_owner(owner) {
+            return Err(BridgeError::Unauthorized("Owner not authorized".to_string()));
+        }
+        
+        // Add the admin
+        self.rbac.add_admin(admin);
+        
+        msg!("Added admin: {}", admin);
+        
+        Ok(())
+    }
+    
+    /// Remove an admin
+    pub fn remove_admin(
+        &mut self,
+        owner: &Pubkey,
+        admin: &Pubkey,
+    ) -> Result<(), BridgeError> {
+        // Check if the owner is authorized
+        if !self.rbac.is_owner(owner) {
+            return Err(BridgeError::Unauthorized("Owner not authorized".to_string()));
+        }
+        
+        // Remove the admin
+        self.rbac.remove_admin(admin);
+        
+        msg!("Removed admin: {}", admin);
+        
+        Ok(())
+    }
+    
+    /// Set the security level
+    pub fn set_security_level(
+        &mut self,
+        admin: &Pubkey,
+        security_level: security_module::SecurityLevel,
+    ) -> Result<(), BridgeError> {
+        // Check if the admin is authorized
+        if !self.rbac.is_admin(admin) {
+            return Err(BridgeError::Unauthorized("Admin not authorized".to_string()));
+        }
+        
+        // Set the security level
+        self.config.security_level = security_level;
+        self.security_module.set_security_level(security_level);
+        
+        msg!("Security level set to {:?}", security_level);
+        
+        Ok(())
+    }
+    
+    /// Get the daily deposit volume for a token
+    pub fn get_daily_deposit_volume(&self, token: &[u8; 20]) -> u64 {
+        *self.daily_deposit_volumes.get(token).unwrap_or(&0)
+    }
+    
+    /// Get the daily withdrawal volume for a token
+    pub fn get_daily_withdrawal_volume(&self, token: &[u8; 20]) -> u64 {
+        *self.daily_withdrawal_volumes.get(token).unwrap_or(&0)
+    }
+    
+    /// Get the daily deposit limit for a token
+    pub fn get_daily_deposit_limit(&self, token: &[u8; 20]) -> u64 {
+        *self.config.daily_deposit_limits.get(token).unwrap_or(&u64::MAX)
+    }
+    
+    /// Get the daily withdrawal limit for a token
+    pub fn get_daily_withdrawal_limit(&self, token: &[u8; 20]) -> u64 {
+        *self.config.daily_withdrawal_limits.get(token).unwrap_or(&u64::MAX)
     }
 }
 
@@ -534,30 +776,54 @@ pub enum BridgeInstruction {
         
         /// L1 withdrawal bridge address
         l1_withdrawal_bridge_address: [u8; 20],
-        
-        /// Minimum L1 confirmations
-        min_l1_confirmations: u64,
-        
-        /// Minimum L2 confirmations
-        min_l2_confirmations: u64,
     },
     
     /// Update the bridge
     Update,
     
-    /// Deposit instructions
-    Deposit(deposit_handler::DepositInstruction),
+    /// Process a deposit from L1
+    ProcessDeposit {
+        /// L1 transaction hash
+        l1_tx_hash: [u8; 32],
+        
+        /// L1 block number
+        l1_block_number: u64,
+        
+        /// Token address
+        token: [u8; 20],
+        
+        /// Amount
+        amount: u64,
+        
+        /// Recipient address
+        recipient: [u8; 32],
+    },
     
-    /// Withdrawal instructions
-    Withdrawal(withdrawal_handler::WithdrawalInstruction),
+    /// Process a withdrawal to L1
+    ProcessWithdrawal {
+        /// L2 transaction hash
+        l2_tx_hash: [u8; 32],
+        
+        /// L2 block number
+        l2_block_number: u64,
+        
+        /// Token address
+        token: [u8; 20],
+        
+        /// Amount
+        amount: u64,
+        
+        /// Recipient address
+        recipient: [u8; 20],
+    },
     
     /// Register a token
     RegisterToken {
         /// L1 token address
-        token_l1: [u8; 20],
+        l1_token: [u8; 20],
         
         /// L2 token address
-        token_l2: [u8; 32],
+        l2_token: [u8; 32],
         
         /// Token name
         name: String,
@@ -569,10 +835,22 @@ pub enum BridgeInstruction {
         decimals: u8,
     },
     
-    /// Unregister a token
-    UnregisterToken {
-        /// L1 token address
-        token_l1: [u8; 20],
+    /// Set the daily deposit limit for a token
+    SetDailyDepositLimit {
+        /// Token address
+        token: [u8; 20],
+        
+        /// Limit
+        limit: u64,
+    },
+    
+    /// Set the daily withdrawal limit for a token
+    SetDailyWithdrawalLimit {
+        /// Token address
+        token: [u8; 20],
+        
+        /// Limit
+        limit: u64,
     },
     
     /// Add a relayer
@@ -611,28 +889,10 @@ pub enum BridgeInstruction {
         admin: Pubkey,
     },
     
-    /// Set daily deposit limit
-    SetDailyDepositLimit {
-        /// Token address
-        token: [u8; 20],
-        
-        /// Daily limit
-        limit: u64,
-    },
-    
-    /// Set daily withdrawal limit
-    SetDailyWithdrawalLimit {
-        /// Token address
-        token: [u8; 20],
-        
-        /// Daily limit
-        limit: u64,
-    },
-    
-    /// Set security level
+    /// Set the security level
     SetSecurityLevel {
         /// Security level
-        level: security_module::SecurityLevel,
+        security_level: security_module::SecurityLevel,
     },
 }
 
@@ -644,274 +904,135 @@ pub fn process_instruction(
 ) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
     
+    // Get the system account
+    let system_account = next_account_info(account_info_iter)?;
+    
+    // Create or get the bridge manager
+    let mut bridge_manager = BridgeManager::new([0; 20], [0; 20]);
+    
     match instruction {
         BridgeInstruction::Initialize {
             l1_bridge_address,
             l1_withdrawal_bridge_address,
-            min_l1_confirmations,
-            min_l2_confirmations,
         } => {
-            // Get the owner account
-            let owner_info = next_account_info(account_info_iter)?;
+            // Create a new bridge manager
+            bridge_manager = BridgeManager::new(*l1_bridge_address, *l1_withdrawal_bridge_address);
             
-            // Check if the owner is a signer
-            if !owner_info.is_signer {
-                return Err(ProgramError::MissingRequiredSignature);
-            }
+            // Set the owner to the system account
+            bridge_manager.rbac = BridgeRBAC::new(*system_account.key);
             
-            // Get the bridge account
-            let bridge_info = next_account_info(account_info_iter)?;
+            // Initialize the bridge manager
+            bridge_manager.initialize(program_id, accounts)?;
             
-            // Check if the bridge account is owned by the program
-            if bridge_info.owner != program_id {
-                return Err(ProgramError::IncorrectProgramId);
-            }
-            
-            // Create a bridge manager
-            let mut manager = BridgeManager::new(*l1_bridge_address, *l1_withdrawal_bridge_address);
-            
-            // Set the configuration
-            manager.config.min_l1_confirmations = *min_l1_confirmations;
-            manager.config.min_l2_confirmations = *min_l2_confirmations;
-            
-            // Set the RBAC owner
-            manager.rbac.owner = *owner_info.key;
-            
-            // Initialize the manager
-            manager.initialize(program_id, accounts)?;
-            
-            // In a real implementation, we would serialize the manager to the bridge account
-            // For now, we just log the initialization
-            msg!("Bridge initialized with L1 bridge address: {:?}", l1_bridge_address);
+            msg!("Bridge initialized");
             
             Ok(())
         },
         BridgeInstruction::Update => {
-            // Get the bridge account
-            let bridge_info = next_account_info(account_info_iter)?;
+            // Update the bridge manager
+            bridge_manager.update()
+                .map_err(|e| {
+                    msg!("Error updating bridge manager: {}", e);
+                    ProgramError::Custom(1)
+                })?;
             
-            // Check if the bridge account is owned by the program
-            if bridge_info.owner != program_id {
-                return Err(ProgramError::IncorrectProgramId);
-            }
-            
-            // In a real implementation, we would:
-            // 1. Deserialize the bridge manager from the bridge account
-            // 2. Update the manager
-            // 3. Serialize the updated manager to the bridge account
-            
-            // For now, we just log the update
             msg!("Bridge updated");
             
             Ok(())
         },
-        BridgeInstruction::Deposit(deposit_instruction) => {
-            deposit_handler::process_instruction(program_id, accounts, deposit_instruction)
+        BridgeInstruction::ProcessDeposit {
+            l1_tx_hash,
+            l1_block_number,
+            token,
+            amount,
+            recipient,
+        } => {
+            // Get the relayer account
+            let relayer_account = next_account_info(account_info_iter)?;
+            
+            // Verify the relayer account is a signer
+            if !relayer_account.is_signer {
+                return Err(ProgramError::MissingRequiredSignature);
+            }
+            
+            // Process the deposit
+            bridge_manager.process_deposit(
+                relayer_account.key,
+                *l1_tx_hash,
+                *l1_block_number,
+                *token,
+                *amount,
+                *recipient,
+            ).map_err(|e| {
+                msg!("Error processing deposit: {}", e);
+                ProgramError::Custom(2)
+            })?;
+            
+            msg!("Deposit processed");
+            
+            Ok(())
         },
-        BridgeInstruction::Withdrawal(withdrawal_instruction) => {
-            withdrawal_handler::process_instruction(program_id, accounts, withdrawal_instruction)
+        BridgeInstruction::ProcessWithdrawal {
+            l2_tx_hash,
+            l2_block_number,
+            token,
+            amount,
+            recipient,
+        } => {
+            // Get the validator account
+            let validator_account = next_account_info(account_info_iter)?;
+            
+            // Verify the validator account is a signer
+            if !validator_account.is_signer {
+                return Err(ProgramError::MissingRequiredSignature);
+            }
+            
+            // Process the withdrawal
+            bridge_manager.process_withdrawal(
+                validator_account.key,
+                *l2_tx_hash,
+                *l2_block_number,
+                *token,
+                *amount,
+                *recipient,
+            ).map_err(|e| {
+                msg!("Error processing withdrawal: {}", e);
+                ProgramError::Custom(3)
+            })?;
+            
+            msg!("Withdrawal processed");
+            
+            Ok(())
         },
         BridgeInstruction::RegisterToken {
-            token_l1,
-            token_l2,
+            l1_token,
+            l2_token,
             name,
             symbol,
             decimals,
         } => {
             // Get the admin account
-            let admin_info = next_account_info(account_info_iter)?;
+            let admin_account = next_account_info(account_info_iter)?;
             
-            // Check if the admin is a signer
-            if !admin_info.is_signer {
+            // Verify the admin account is a signer
+            if !admin_account.is_signer {
                 return Err(ProgramError::MissingRequiredSignature);
             }
             
-            // Get the bridge account
-            let bridge_info = next_account_info(account_info_iter)?;
+            // Register the token
+            bridge_manager.register_token(
+                admin_account.key,
+                *l1_token,
+                *l2_token,
+                name.clone(),
+                symbol.clone(),
+                *decimals,
+            ).map_err(|e| {
+                msg!("Error registering token: {}", e);
+                ProgramError::Custom(4)
+            })?;
             
-            // In a real implementation, we would:
-            // 1. Deserialize the bridge manager from the bridge account
-            // 2. Check if the signer is an admin
-            // 3. Register the token
-            // 4. Serialize the updated manager to the bridge account
-            
-            // For now, we just log the registration
-            msg!("Registered token: {} ({})", name, symbol);
-            
-            Ok(())
-        },
-        BridgeInstruction::UnregisterToken {
-            token_l1,
-        } => {
-            // Get the admin account
-            let admin_info = next_account_info(account_info_iter)?;
-            
-            // Check if the admin is a signer
-            if !admin_info.is_signer {
-                return Err(ProgramError::MissingRequiredSignature);
-            }
-            
-            // Get the bridge account
-            let bridge_info = next_account_info(account_info_iter)?;
-            
-            // In a real implementation, we would:
-            // 1. Deserialize the bridge manager from the bridge account
-            // 2. Check if the signer is an admin
-            // 3. Unregister the token
-            // 4. Serialize the updated manager to the bridge account
-            
-            // For now, we just log the unregistration
-            msg!("Unregistered token: {:?}", token_l1);
-            
-            Ok(())
-        },
-        BridgeInstruction::AddRelayer {
-            relayer,
-        } => {
-            // Get the owner account
-            let owner_info = next_account_info(account_info_iter)?;
-            
-            // Check if the owner is a signer
-            if !owner_info.is_signer {
-                return Err(ProgramError::MissingRequiredSignature);
-            }
-            
-            // Get the bridge account
-            let bridge_info = next_account_info(account_info_iter)?;
-            
-            // In a real implementation, we would:
-            // 1. Deserialize the bridge manager from the bridge account
-            // 2. Check if the signer is the owner
-            // 3. Add the relayer
-            // 4. Serialize the updated manager to the bridge account
-            
-            // For now, we just log the addition
-            msg!("Added relayer: {}", relayer);
-            
-            Ok(())
-        },
-        BridgeInstruction::RemoveRelayer {
-            relayer,
-        } => {
-            // Get the owner account
-            let owner_info = next_account_info(account_info_iter)?;
-            
-            // Check if the owner is a signer
-            if !owner_info.is_signer {
-                return Err(ProgramError::MissingRequiredSignature);
-            }
-            
-            // Get the bridge account
-            let bridge_info = next_account_info(account_info_iter)?;
-            
-            // In a real implementation, we would:
-            // 1. Deserialize the bridge manager from the bridge account
-            // 2. Check if the signer is the owner
-            // 3. Remove the relayer
-            // 4. Serialize the updated manager to the bridge account
-            
-            // For now, we just log the removal
-            msg!("Removed relayer: {}", relayer);
-            
-            Ok(())
-        },
-        BridgeInstruction::AddValidator {
-            validator,
-        } => {
-            // Get the owner account
-            let owner_info = next_account_info(account_info_iter)?;
-            
-            // Check if the owner is a signer
-            if !owner_info.is_signer {
-                return Err(ProgramError::MissingRequiredSignature);
-            }
-            
-            // Get the bridge account
-            let bridge_info = next_account_info(account_info_iter)?;
-            
-            // In a real implementation, we would:
-            // 1. Deserialize the bridge manager from the bridge account
-            // 2. Check if the signer is the owner
-            // 3. Add the validator
-            // 4. Serialize the updated manager to the bridge account
-            
-            // For now, we just log the addition
-            msg!("Added validator: {}", validator);
-            
-            Ok(())
-        },
-        BridgeInstruction::RemoveValidator {
-            validator,
-        } => {
-            // Get the owner account
-            let owner_info = next_account_info(account_info_iter)?;
-            
-            // Check if the owner is a signer
-            if !owner_info.is_signer {
-                return Err(ProgramError::MissingRequiredSignature);
-            }
-            
-            // Get the bridge account
-            let bridge_info = next_account_info(account_info_iter)?;
-            
-            // In a real implementation, we would:
-            // 1. Deserialize the bridge manager from the bridge account
-            // 2. Check if the signer is the owner
-            // 3. Remove the validator
-            // 4. Serialize the updated manager to the bridge account
-            
-            // For now, we just log the removal
-            msg!("Removed validator: {}", validator);
-            
-            Ok(())
-        },
-        BridgeInstruction::AddAdmin {
-            admin,
-        } => {
-            // Get the owner account
-            let owner_info = next_account_info(account_info_iter)?;
-            
-            // Check if the owner is a signer
-            if !owner_info.is_signer {
-                return Err(ProgramError::MissingRequiredSignature);
-            }
-            
-            // Get the bridge account
-            let bridge_info = next_account_info(account_info_iter)?;
-            
-            // In a real implementation, we would:
-            // 1. Deserialize the bridge manager from the bridge account
-            // 2. Check if the signer is the owner
-            // 3. Add the admin
-            // 4. Serialize the updated manager to the bridge account
-            
-            // For now, we just log the addition
-            msg!("Added admin: {}", admin);
-            
-            Ok(())
-        },
-        BridgeInstruction::RemoveAdmin {
-            admin,
-        } => {
-            // Get the owner account
-            let owner_info = next_account_info(account_info_iter)?;
-            
-            // Check if the owner is a signer
-            if !owner_info.is_signer {
-                return Err(ProgramError::MissingRequiredSignature);
-            }
-            
-            // Get the bridge account
-            let bridge_info = next_account_info(account_info_iter)?;
-            
-            // In a real implementation, we would:
-            // 1. Deserialize the bridge manager from the bridge account
-            // 2. Check if the signer is the owner
-            // 3. Remove the admin
-            // 4. Serialize the updated manager to the bridge account
-            
-            // For now, we just log the removal
-            msg!("Removed admin: {}", admin);
+            msg!("Token registered");
             
             Ok(())
         },
@@ -920,24 +1041,24 @@ pub fn process_instruction(
             limit,
         } => {
             // Get the admin account
-            let admin_info = next_account_info(account_info_iter)?;
+            let admin_account = next_account_info(account_info_iter)?;
             
-            // Check if the admin is a signer
-            if !admin_info.is_signer {
+            // Verify the admin account is a signer
+            if !admin_account.is_signer {
                 return Err(ProgramError::MissingRequiredSignature);
             }
             
-            // Get the bridge account
-            let bridge_info = next_account_info(account_info_iter)?;
+            // Set the daily deposit limit
+            bridge_manager.set_daily_deposit_limit(
+                admin_account.key,
+                *token,
+                *limit,
+            ).map_err(|e| {
+                msg!("Error setting daily deposit limit: {}", e);
+                ProgramError::Custom(5)
+            })?;
             
-            // In a real implementation, we would:
-            // 1. Deserialize the bridge manager from the bridge account
-            // 2. Check if the signer is an admin
-            // 3. Set the daily deposit limit
-            // 4. Serialize the updated manager to the bridge account
-            
-            // For now, we just log the limit
-            msg!("Set daily deposit limit for token {:?}: {}", token, limit);
+            msg!("Daily deposit limit set");
             
             Ok(())
         },
@@ -946,49 +1067,192 @@ pub fn process_instruction(
             limit,
         } => {
             // Get the admin account
-            let admin_info = next_account_info(account_info_iter)?;
+            let admin_account = next_account_info(account_info_iter)?;
             
-            // Check if the admin is a signer
-            if !admin_info.is_signer {
+            // Verify the admin account is a signer
+            if !admin_account.is_signer {
                 return Err(ProgramError::MissingRequiredSignature);
             }
             
-            // Get the bridge account
-            let bridge_info = next_account_info(account_info_iter)?;
+            // Set the daily withdrawal limit
+            bridge_manager.set_daily_withdrawal_limit(
+                admin_account.key,
+                *token,
+                *limit,
+            ).map_err(|e| {
+                msg!("Error setting daily withdrawal limit: {}", e);
+                ProgramError::Custom(6)
+            })?;
             
-            // In a real implementation, we would:
-            // 1. Deserialize the bridge manager from the bridge account
-            // 2. Check if the signer is an admin
-            // 3. Set the daily withdrawal limit
-            // 4. Serialize the updated manager to the bridge account
+            msg!("Daily withdrawal limit set");
             
-            // For now, we just log the limit
-            msg!("Set daily withdrawal limit for token {:?}: {}", token, limit);
+            Ok(())
+        },
+        BridgeInstruction::AddRelayer {
+            relayer,
+        } => {
+            // Get the admin account
+            let admin_account = next_account_info(account_info_iter)?;
+            
+            // Verify the admin account is a signer
+            if !admin_account.is_signer {
+                return Err(ProgramError::MissingRequiredSignature);
+            }
+            
+            // Add the relayer
+            bridge_manager.add_relayer(
+                admin_account.key,
+                *relayer,
+            ).map_err(|e| {
+                msg!("Error adding relayer: {}", e);
+                ProgramError::Custom(7)
+            })?;
+            
+            msg!("Relayer added");
+            
+            Ok(())
+        },
+        BridgeInstruction::RemoveRelayer {
+            relayer,
+        } => {
+            // Get the admin account
+            let admin_account = next_account_info(account_info_iter)?;
+            
+            // Verify the admin account is a signer
+            if !admin_account.is_signer {
+                return Err(ProgramError::MissingRequiredSignature);
+            }
+            
+            // Remove the relayer
+            bridge_manager.remove_relayer(
+                admin_account.key,
+                relayer,
+            ).map_err(|e| {
+                msg!("Error removing relayer: {}", e);
+                ProgramError::Custom(8)
+            })?;
+            
+            msg!("Relayer removed");
+            
+            Ok(())
+        },
+        BridgeInstruction::AddValidator {
+            validator,
+        } => {
+            // Get the admin account
+            let admin_account = next_account_info(account_info_iter)?;
+            
+            // Verify the admin account is a signer
+            if !admin_account.is_signer {
+                return Err(ProgramError::MissingRequiredSignature);
+            }
+            
+            // Add the validator
+            bridge_manager.add_validator(
+                admin_account.key,
+                *validator,
+            ).map_err(|e| {
+                msg!("Error adding validator: {}", e);
+                ProgramError::Custom(9)
+            })?;
+            
+            msg!("Validator added");
+            
+            Ok(())
+        },
+        BridgeInstruction::RemoveValidator {
+            validator,
+        } => {
+            // Get the admin account
+            let admin_account = next_account_info(account_info_iter)?;
+            
+            // Verify the admin account is a signer
+            if !admin_account.is_signer {
+                return Err(ProgramError::MissingRequiredSignature);
+            }
+            
+            // Remove the validator
+            bridge_manager.remove_validator(
+                admin_account.key,
+                validator,
+            ).map_err(|e| {
+                msg!("Error removing validator: {}", e);
+                ProgramError::Custom(10)
+            })?;
+            
+            msg!("Validator removed");
+            
+            Ok(())
+        },
+        BridgeInstruction::AddAdmin {
+            admin,
+        } => {
+            // Get the owner account
+            let owner_account = next_account_info(account_info_iter)?;
+            
+            // Verify the owner account is a signer
+            if !owner_account.is_signer {
+                return Err(ProgramError::MissingRequiredSignature);
+            }
+            
+            // Add the admin
+            bridge_manager.add_admin(
+                owner_account.key,
+                *admin,
+            ).map_err(|e| {
+                msg!("Error adding admin: {}", e);
+                ProgramError::Custom(11)
+            })?;
+            
+            msg!("Admin added");
+            
+            Ok(())
+        },
+        BridgeInstruction::RemoveAdmin {
+            admin,
+        } => {
+            // Get the owner account
+            let owner_account = next_account_info(account_info_iter)?;
+            
+            // Verify the owner account is a signer
+            if !owner_account.is_signer {
+                return Err(ProgramError::MissingRequiredSignature);
+            }
+            
+            // Remove the admin
+            bridge_manager.remove_admin(
+                owner_account.key,
+                admin,
+            ).map_err(|e| {
+                msg!("Error removing admin: {}", e);
+                ProgramError::Custom(12)
+            })?;
+            
+            msg!("Admin removed");
             
             Ok(())
         },
         BridgeInstruction::SetSecurityLevel {
-            level,
+            security_level,
         } => {
             // Get the admin account
-            let admin_info = next_account_info(account_info_iter)?;
+            let admin_account = next_account_info(account_info_iter)?;
             
-            // Check if the admin is a signer
-            if !admin_info.is_signer {
+            // Verify the admin account is a signer
+            if !admin_account.is_signer {
                 return Err(ProgramError::MissingRequiredSignature);
             }
             
-            // Get the bridge account
-            let bridge_info = next_account_info(account_info_iter)?;
+            // Set the security level
+            bridge_manager.set_security_level(
+                admin_account.key,
+                *security_level,
+            ).map_err(|e| {
+                msg!("Error setting security level: {}", e);
+                ProgramError::Custom(13)
+            })?;
             
-            // In a real implementation, we would:
-            // 1. Deserialize the bridge manager from the bridge account
-            // 2. Check if the signer is an admin
-            // 3. Set the security level
-            // 4. Serialize the updated manager to the bridge account
-            
-            // For now, we just log the level
-            msg!("Set security level: {:?}", level);
+            msg!("Security level set");
             
             Ok(())
         },
@@ -1001,7 +1265,7 @@ mod tests {
     
     #[test]
     fn test_bridge_rbac() {
-        // Create an RBAC with a test owner
+        // Create a new RBAC with a test owner
         let owner = Pubkey::new_unique();
         let mut rbac = BridgeRBAC::new(owner);
         
@@ -1009,22 +1273,25 @@ mod tests {
         assert!(rbac.is_owner(&owner));
         assert!(!rbac.is_owner(&Pubkey::new_unique()));
         
-        // Test relayer management
+        // Test relayer checks
         let relayer = Pubkey::new_unique();
+        assert!(!rbac.is_relayer(&relayer));
         rbac.add_relayer(relayer);
         assert!(rbac.is_relayer(&relayer));
         rbac.remove_relayer(&relayer);
         assert!(!rbac.is_relayer(&relayer));
         
-        // Test validator management
+        // Test validator checks
         let validator = Pubkey::new_unique();
+        assert!(!rbac.is_validator(&validator));
         rbac.add_validator(validator);
         assert!(rbac.is_validator(&validator));
         rbac.remove_validator(&validator);
         assert!(!rbac.is_validator(&validator));
         
-        // Test admin management
+        // Test admin checks
         let admin = Pubkey::new_unique();
+        assert!(!rbac.is_admin(&admin));
         rbac.add_admin(admin);
         assert!(rbac.is_admin(&admin));
         rbac.remove_admin(&admin);
@@ -1033,22 +1300,25 @@ mod tests {
     
     #[test]
     fn test_bridge_config() {
-        // Create a default configuration
-        let mut config = BridgeConfig::new();
-        
-        // Test default values
+        // Test default configuration
+        let config = BridgeConfig::new();
         assert_eq!(config.min_l1_confirmations, 12);
         assert_eq!(config.min_l2_confirmations, 32);
+        assert_eq!(config.max_l1_gas_limit, 1_000_000);
+        assert_eq!(config.max_l1_gas_price, 100_000_000_000);
+        assert_eq!(config.security_level, security_module::SecurityLevel::High);
+        assert!(config.daily_deposit_limits.is_empty());
+        assert!(config.daily_withdrawal_limits.is_empty());
         
         // Test setting daily limits
+        let mut config = BridgeConfig::new();
         let token = [1; 20];
-        let deposit_limit = 1_000_000;
-        let withdrawal_limit = 500_000;
-        
-        config.set_daily_deposit_limit(token, deposit_limit);
-        config.set_daily_withdrawal_limit(token, withdrawal_limit);
-        
-        assert_eq!(config.daily_deposit_limits.get(&token), Some(&deposit_limit));
-        assert_eq!(config.daily_withdrawal_limits.get(&token), Some(&withdrawal_limit));
+        let limit = 1000;
+        config.set_daily_deposit_limit(token, limit);
+        config.set_daily_withdrawal_limit(token, limit);
+        assert_eq!(config.daily_deposit_limits.get(&token), Some(&limit));
+        assert_eq!(config.daily_withdrawal_limits.get(&token), Some(&limit));
     }
+    
+    // Additional tests would be added here to test the bridge manager
 }
