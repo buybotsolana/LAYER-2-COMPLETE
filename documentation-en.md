@@ -2,189 +2,156 @@
 
 ## Overview
 
-Layer-2 on Solana is an implementation of an Optimistic Rollup that utilizes the Solana Virtual Machine. This system enables increased scalability for the Solana ecosystem while maintaining a high level of security and decentralization.
+This document provides comprehensive documentation for the Layer-2 solution built on Solana. The Layer-2 is designed to enhance Solana's scalability and reduce transaction costs while maintaining security through an optimistic rollup architecture.
 
-## System Architecture
+## Core Components
 
-The system consists of several main components:
+### 1. Optimistic Rollup System
 
-1. **Fraud Proof System**: Verifies transaction validity and allows contesting invalid transactions.
-2. **Finalization System**: Manages block finalization and state commitment.
-3. **Bridge**: Handles asset transfers between Layer-1 (Solana) and Layer-2.
-4. **Standardized Interfaces**: Ensure consistency and interoperability between components.
-5. **Error Handling**: Provides robust mechanisms for error handling and recovery.
+The optimistic rollup system allows for off-chain transaction execution with on-chain verification. Key features include:
 
-## Main Components
+- **Transaction Batching**: Multiple transactions are grouped into batches for efficient processing
+- **State Commitment**: Each batch includes state roots that represent the system state before and after transaction execution
+- **Fraud Proof Verification**: Validators can submit fraud proofs if they detect invalid state transitions
+- **Challenge Mechanism**: A 7-day challenge period during which validators can contest invalid transactions
 
-### Fraud Proof System
+Implementation: `src/rollup/optimistic_rollup.rs`
 
-The Fraud Proof System is responsible for verifying transaction validity and contesting invalid transactions. It uses a bisection game to identify the exact point of disagreement in a sequence of transactions.
+### 2. Bridge System
 
-**Main files**:
-- `src/fraud_proof_system/mod.rs`: Main module of the Fraud Proof System
-- `src/fraud_proof_system/fraud_proof.rs`: Implementation of fraud proofs
-- `src/fraud_proof_system/bisection.rs`: Implementation of the bisection game
-- `src/fraud_proof_system/merkle_tree.rs`: Implementation of the Merkle tree
-- `src/fraud_proof_system/state_transition.rs`: Management of state transitions
-- `src/fraud_proof_system/verification.rs`: Verification of fraud proofs
-- `src/fraud_proof_system/solana_runtime_wrapper.rs`: Wrapper for the Solana runtime
+The bridge system enables secure asset transfers between Solana L1 and the Layer-2. Key features include:
 
-### Finalization System
+- **Deposit Mechanism**: Lock tokens on L1, mint on L2
+- **Withdrawal Mechanism**: Burn tokens on L2, unlock on L1
+- **Wormhole Integration**: Secure cross-chain messaging
+- **Support for Multiple Asset Types**: Native SOL, SPL tokens, and NFTs
+- **Replay Protection**: Nonce tracking to prevent replay attacks
 
-The Finalization System manages block finalization and state commitment. It ensures that blocks are finalized only after a challenge period.
+Implementation: `src/bridge/complete_bridge.rs`
 
-**Main files**:
-- `src/finalization/mod.rs`: Main module of the Finalization System
-- `src/finalization/block_finalization.rs`: Block finalization
-- `src/finalization/state_commitment.rs`: State commitment
-- `src/finalization/output_oracle.rs`: Oracle for Layer-2 outputs
+### 3. Transaction Sequencer
 
-### Bridge
+The transaction sequencer collects, orders, and publishes transactions. Key features include:
 
-The Bridge handles asset transfers between Layer-1 (Solana) and Layer-2. It supports token deposits and withdrawals.
+- **Transaction Collection**: Users submit transactions to the sequencer
+- **Batch Creation**: Transactions are organized into batches based on priority and fees
+- **Priority System**: High-priority transactions are processed first
+- **L1 Publication**: Batches are published to the L1 chain for verification
 
-**Main files**:
-- `src/bridge/mod.rs`: Main module of the Bridge
-- `src/bridge/deposit_handler.rs`: Deposit handling
-- `src/bridge/withdrawal_handler.rs`: Withdrawal handling
+Implementation: `src/sequencer/transaction_sequencer.rs`
 
-### Standardized Interfaces
+### 4. Gasless Transaction System
 
-Standardized interfaces ensure consistency and interoperability between system components.
+The gasless transaction system improves user experience by removing the need for users to hold native tokens for gas. Key features include:
 
-**Main files**:
-- `src/interfaces/component_interface.rs`: Generic interfaces for all components
-- `src/interfaces/fraud_proof_interface.rs`: Specific interfaces for the Fraud Proof System
-- `src/interfaces/finalization_interface.rs`: Specific interfaces for the Finalization System
-- `src/interfaces/bridge_interface.rs`: Specific interfaces for the Bridge
+- **Meta-Transactions**: Users sign structured data instead of transactions
+- **Relayers**: Third parties who submit transactions on behalf of users
+- **Fee Subsidization**: Mechanism to subsidize transaction fees
+- **Fee Abstraction**: Users can pay fees in any token
 
-### Error Handling
+Implementation: `src/fee_optimization/gasless_transactions.rs`
 
-Error handling provides robust mechanisms for error management and recovery.
+## Architecture
 
-**Main files**:
-- `src/error_handling/error_types.rs`: Standard error types
-- `src/error_handling/error_handler.rs`: Error handling and recovery mechanisms
+The Layer-2 solution follows an optimistic rollup architecture:
 
-## Execution Flow
+1. **Users** submit transactions to the **Sequencer**
+2. The **Sequencer** batches transactions and publishes them to Solana L1
+3. **Validators** verify the transactions and can submit fraud proofs if they detect invalid state transitions
+4. After the challenge period, transactions are considered final
 
-1. **Asset Deposit**:
-   - A user deposits assets on Layer-1
-   - The Bridge detects the deposit and creates a corresponding asset on Layer-2
+## Security Model
 
-2. **Transaction Execution**:
-   - Transactions are executed on Layer-2
-   - Transaction results are published on Layer-1
+The security model relies on the following principles:
 
-3. **Verification and Contestation**:
-   - Anyone can verify transaction validity
-   - If an invalid transaction is detected, it can be contested via a fraud proof
+1. **Optimistic Assumption**: Transactions are assumed valid by default
+2. **Challenge Period**: Validators have 7 days to submit fraud proofs
+3. **Economic Incentives**: Validators are incentivized to detect and report fraud
+4. **Slashing**: Malicious validators can have their stake slashed
 
-4. **Finalization**:
-   - After a challenge period, blocks are finalized
-   - Finalized states are committed to Layer-1
+## Integration Guide
 
-5. **Asset Withdrawal**:
-   - A user can withdraw assets from Layer-2 to Layer-1
-   - The Bridge verifies withdrawal validity and releases assets on Layer-1
+### Depositing Assets
 
-## Configuration and Usage
+To deposit assets from Solana L1 to Layer-2:
 
-### System Requirements
+1. Call the `DepositSol`, `DepositToken`, or `DepositNFT` instruction on the bridge program
+2. Specify the recipient address on Layer-2
+3. The bridge will lock your assets on L1 and mint equivalent assets on L2
 
-- Solana CLI
-- Rust 1.60 or higher
-- Node.js 14 or higher
+### Withdrawing Assets
 
-### Installation
+To withdraw assets from Layer-2 to Solana L1:
 
-```bash
-# Clone the repository
-git clone https://github.com/buybotsolana/LAYER-2-COMPLETE.git
-cd LAYER-2-COMPLETE
+1. Call the `InitiateWithdrawal` instruction on the Layer-2
+2. Specify the recipient address on L1
+3. After the challenge period, call the `CompleteWithdrawal` instruction on the bridge program
 
-# Install dependencies
-cargo build --release
-npm install
-```
+### Submitting Transactions
 
-### Configuration
+To submit a transaction to the Layer-2:
 
-1. Configure the Solana node:
-```bash
-solana config set --url https://api.mainnet-beta.solana.com
-```
+1. Call the `SubmitTransaction` instruction on the sequencer program
+2. Specify the transaction data, fee, and priority
+3. The sequencer will include your transaction in the next batch
 
-2. Configure Layer-2:
-```bash
-./setup_layer2.sh
-```
+### Using Gasless Transactions
 
-### Execution
+To use gasless transactions:
 
-1. Start the Layer-2 node:
-```bash
-./start_layer2.sh
-```
+1. Create a meta-transaction with your transaction data
+2. Sign the meta-transaction using EIP-712 style signing
+3. Submit the meta-transaction to a relayer
+4. The relayer will submit the transaction on your behalf
 
-2. Interact with Layer-2:
-```bash
-./layer2_cli.sh deposit --amount 1 --token SOL
-./layer2_cli.sh transfer --to <ADDRESS> --amount 0.5 --token SOL
-./layer2_cli.sh withdraw --amount 0.5 --token SOL
-```
+## Performance Characteristics
 
-## Testing
+- **Transaction Throughput**: Up to 1000 transactions per batch
+- **Batch Creation Time**: Maximum 60 seconds
+- **Finality Time**: 7 days (challenge period)
+- **Cost Reduction**: Up to 100x compared to L1 transactions
 
-### Unit Tests
+## Development and Testing
+
+### Local Development
+
+To set up a local development environment:
+
+1. Clone the repository
+2. Install dependencies
+3. Run the local test network
+4. Deploy the Layer-2 contracts
+
+### Testing
+
+The repository includes comprehensive tests:
+
+- Unit tests for each component
+- Integration tests for the entire system
+- Stress tests with high transaction volumes
+- Security tests using Echidna
+
+Run tests using:
 
 ```bash
-cargo test
+./final_test.sh
 ```
 
-### Integration Tests
+### Deployment
+
+To deploy the Layer-2 to testnet or mainnet:
 
 ```bash
-cargo test --test integration_test
+./deploy_beta.sh [testnet|mainnet]
 ```
-
-### Stress Tests
-
-```bash
-./stress_test.sh
-```
-
-## Security
-
-The system implements several security measures:
-
-1. **Fraud Proofs**: Allow contesting invalid transactions
-2. **Challenge Period**: Provides sufficient time to verify transactions
-3. **Error Handling**: Implements robust mechanisms for error handling
-4. **Authorizations**: Verifies authorizations for critical operations
-
-## Current Limitations
-
-1. Limited support for non-native tokens
-2. Finalization latency due to the challenge period
-3. Dependency on Layer-1 availability
 
 ## Future Roadmap
 
-1. Support for more complex smart contracts
-2. Performance improvements
-3. Integration with other ecosystems
-4. Implementation of ZK-rollups to reduce finalization latency
+1. **ZK Rollup Migration**: Transition from optimistic to ZK rollups for faster finality
+2. **Cross-Chain Integration**: Support for more chains beyond Solana
+3. **DAO Governance**: Decentralized governance for protocol parameters
+4. **Layer-2 Native DApps**: Ecosystem of applications built specifically for the Layer-2
 
-## Contributing
+## Conclusion
 
-Contributions are welcome! To contribute:
-
-1. Fork the repository
-2. Create a branch for your feature
-3. Commit your changes
-4. Submit a pull request
-
-## License
-
-This project is released under the MIT license.
+This Layer-2 solution provides a complete, secure, and efficient scaling solution for Solana. By implementing optimistic rollups with a robust bridge, sequencer, and gasless transaction system, it significantly improves the user experience while maintaining the security guarantees of the Solana blockchain.

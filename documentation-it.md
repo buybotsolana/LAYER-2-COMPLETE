@@ -2,189 +2,156 @@
 
 ## Panoramica
 
-Layer-2 su Solana è un'implementazione di un Optimistic Rollup che utilizza la Solana Virtual Machine. Questo sistema consente di aumentare la scalabilità dell'ecosistema Solana, mantenendo al contempo un alto livello di sicurezza e decentralizzazione.
-
-## Architettura del Sistema
-
-Il sistema è composto da diversi componenti principali:
-
-1. **Sistema di Fraud Proof**: Verifica la validità delle transazioni e consente di contestare transazioni invalide.
-2. **Sistema di Finalizzazione**: Gestisce la finalizzazione dei blocchi e il commitment degli stati.
-3. **Bridge**: Gestisce il trasferimento di asset tra Layer-1 (Solana) e Layer-2.
-4. **Interfacce Standardizzate**: Garantiscono la coerenza e l'interoperabilità tra i componenti.
-5. **Gestione degli Errori**: Fornisce meccanismi robusti per la gestione degli errori e il ripristino.
+Questo documento fornisce una documentazione completa per la soluzione Layer-2 costruita su Solana. Il Layer-2 è progettato per migliorare la scalabilità di Solana e ridurre i costi delle transazioni mantenendo la sicurezza attraverso un'architettura di rollup ottimistico.
 
 ## Componenti Principali
 
-### Sistema di Fraud Proof
+### 1. Sistema di Rollup Ottimistico
 
-Il sistema di Fraud Proof è responsabile della verifica della validità delle transazioni e della contestazione di transazioni invalide. Utilizza un gioco di bisezione per identificare il punto esatto di disaccordo in una sequenza di transazioni.
+Il sistema di rollup ottimistico consente l'esecuzione delle transazioni off-chain con verifica on-chain. Le caratteristiche principali includono:
 
-**File principali**:
-- `src/fraud_proof_system/mod.rs`: Modulo principale del sistema di Fraud Proof
-- `src/fraud_proof_system/fraud_proof.rs`: Implementazione dei fraud proof
-- `src/fraud_proof_system/bisection.rs`: Implementazione del gioco di bisezione
-- `src/fraud_proof_system/merkle_tree.rs`: Implementazione dell'albero di Merkle
-- `src/fraud_proof_system/state_transition.rs`: Gestione delle transizioni di stato
-- `src/fraud_proof_system/verification.rs`: Verifica dei fraud proof
-- `src/fraud_proof_system/solana_runtime_wrapper.rs`: Wrapper per il runtime di Solana
+- **Raggruppamento delle Transazioni**: Più transazioni sono raggruppate in batch per un'elaborazione efficiente
+- **Commitment dello Stato**: Ogni batch include radici di stato che rappresentano lo stato del sistema prima e dopo l'esecuzione della transazione
+- **Verifica delle Prove di Frode**: I validatori possono inviare prove di frode se rilevano transizioni di stato non valide
+- **Meccanismo di Contestazione**: Un periodo di contestazione di 7 giorni durante il quale i validatori possono contestare transazioni non valide
 
-### Sistema di Finalizzazione
+Implementazione: `src/rollup/optimistic_rollup.rs`
 
-Il sistema di Finalizzazione gestisce la finalizzazione dei blocchi e il commitment degli stati. Garantisce che i blocchi siano finalizzati solo dopo un periodo di contestazione.
+### 2. Sistema di Bridge
 
-**File principali**:
-- `src/finalization/mod.rs`: Modulo principale del sistema di Finalizzazione
-- `src/finalization/block_finalization.rs`: Finalizzazione dei blocchi
-- `src/finalization/state_commitment.rs`: Commitment degli stati
-- `src/finalization/output_oracle.rs`: Oracle per gli output di Layer-2
+Il sistema di bridge consente trasferimenti sicuri di asset tra Solana L1 e il Layer-2. Le caratteristiche principali includono:
 
-### Bridge
+- **Meccanismo di Deposito**: Blocco dei token su L1, conio su L2
+- **Meccanismo di Prelievo**: Bruciatura dei token su L2, sblocco su L1
+- **Integrazione con Wormhole**: Messaggistica cross-chain sicura
+- **Supporto per Diversi Tipi di Asset**: SOL nativo, token SPL e NFT
+- **Protezione Replay**: Tracciamento dei nonce per prevenire attacchi replay
 
-Il Bridge gestisce il trasferimento di asset tra Layer-1 (Solana) e Layer-2. Supporta depositi e prelievi di token.
+Implementazione: `src/bridge/complete_bridge.rs`
 
-**File principali**:
-- `src/bridge/mod.rs`: Modulo principale del Bridge
-- `src/bridge/deposit_handler.rs`: Gestione dei depositi
-- `src/bridge/withdrawal_handler.rs`: Gestione dei prelievi
+### 3. Sequencer di Transazioni
 
-### Interfacce Standardizzate
+Il sequencer di transazioni raccoglie, ordina e pubblica le transazioni. Le caratteristiche principali includono:
 
-Le interfacce standardizzate garantiscono la coerenza e l'interoperabilità tra i componenti del sistema.
+- **Raccolta delle Transazioni**: Gli utenti inviano transazioni al sequencer
+- **Creazione di Batch**: Le transazioni sono organizzate in batch in base alla priorità e alle commissioni
+- **Sistema di Priorità**: Le transazioni ad alta priorità vengono elaborate per prime
+- **Pubblicazione su L1**: I batch vengono pubblicati sulla catena L1 per la verifica
 
-**File principali**:
-- `src/interfaces/component_interface.rs`: Interfacce generiche per tutti i componenti
-- `src/interfaces/fraud_proof_interface.rs`: Interfacce specifiche per il sistema di Fraud Proof
-- `src/interfaces/finalization_interface.rs`: Interfacce specifiche per il sistema di Finalizzazione
-- `src/interfaces/bridge_interface.rs`: Interfacce specifiche per il Bridge
+Implementazione: `src/sequencer/transaction_sequencer.rs`
 
-### Gestione degli Errori
+### 4. Sistema di Transazioni Gasless
 
-La gestione degli errori fornisce meccanismi robusti per la gestione degli errori e il ripristino.
+Il sistema di transazioni gasless migliora l'esperienza utente eliminando la necessità per gli utenti di possedere token nativi per il gas. Le caratteristiche principali includono:
 
-**File principali**:
-- `src/error_handling/error_types.rs`: Tipi di errore standard
-- `src/error_handling/error_handler.rs`: Gestione degli errori e meccanismi di ripristino
+- **Meta-Transazioni**: Gli utenti firmano dati strutturati invece di transazioni
+- **Relayer**: Terze parti che inviano transazioni per conto degli utenti
+- **Sovvenzione delle Commissioni**: Meccanismo per sovvenzionare le commissioni di transazione
+- **Astrazione delle Commissioni**: Gli utenti possono pagare commissioni in qualsiasi token
 
-## Flusso di Esecuzione
+Implementazione: `src/fee_optimization/gasless_transactions.rs`
 
-1. **Deposito di Asset**:
-   - Un utente deposita asset su Layer-1
-   - Il Bridge rileva il deposito e crea un asset corrispondente su Layer-2
+## Architettura
 
-2. **Esecuzione di Transazioni**:
-   - Le transazioni vengono eseguite su Layer-2
-   - I risultati delle transazioni vengono pubblicati su Layer-1
+La soluzione Layer-2 segue un'architettura di rollup ottimistico:
 
-3. **Verifica e Contestazione**:
-   - Chiunque può verificare la validità delle transazioni
-   - Se viene rilevata una transazione invalida, può essere contestata tramite un fraud proof
+1. Gli **Utenti** inviano transazioni al **Sequencer**
+2. Il **Sequencer** raggruppa le transazioni e le pubblica su Solana L1
+3. I **Validatori** verificano le transazioni e possono inviare prove di frode se rilevano transizioni di stato non valide
+4. Dopo il periodo di contestazione, le transazioni sono considerate definitive
 
-4. **Finalizzazione**:
-   - Dopo un periodo di contestazione, i blocchi vengono finalizzati
-   - Gli stati finalizzati vengono committati su Layer-1
+## Modello di Sicurezza
 
-5. **Prelievo di Asset**:
-   - Un utente può prelevare asset da Layer-2 a Layer-1
-   - Il Bridge verifica la validità del prelievo e rilascia gli asset su Layer-1
+Il modello di sicurezza si basa sui seguenti principi:
 
-## Configurazione e Utilizzo
+1. **Assunzione Ottimistica**: Le transazioni sono considerate valide per impostazione predefinita
+2. **Periodo di Contestazione**: I validatori hanno 7 giorni per inviare prove di frode
+3. **Incentivi Economici**: I validatori sono incentivati a rilevare e segnalare frodi
+4. **Slashing**: I validatori malintenzionati possono subire lo slashing della loro stake
 
-### Requisiti di Sistema
+## Guida all'Integrazione
 
-- Solana CLI
-- Rust 1.60 o superiore
-- Node.js 14 o superiore
+### Deposito di Asset
 
-### Installazione
+Per depositare asset da Solana L1 al Layer-2:
 
-```bash
-# Clona il repository
-git clone https://github.com/buybotsolana/LAYER-2-COMPLETE.git
-cd LAYER-2-COMPLETE
+1. Chiama l'istruzione `DepositSol`, `DepositToken` o `DepositNFT` sul programma bridge
+2. Specifica l'indirizzo del destinatario sul Layer-2
+3. Il bridge bloccherà i tuoi asset su L1 e conierà asset equivalenti su L2
 
-# Installa le dipendenze
-cargo build --release
-npm install
-```
+### Prelievo di Asset
 
-### Configurazione
+Per prelevare asset dal Layer-2 a Solana L1:
 
-1. Configura il nodo Solana:
-```bash
-solana config set --url https://api.mainnet-beta.solana.com
-```
+1. Chiama l'istruzione `InitiateWithdrawal` sul Layer-2
+2. Specifica l'indirizzo del destinatario su L1
+3. Dopo il periodo di contestazione, chiama l'istruzione `CompleteWithdrawal` sul programma bridge
 
-2. Configura il Layer-2:
-```bash
-./setup_layer2.sh
-```
+### Invio di Transazioni
 
-### Esecuzione
+Per inviare una transazione al Layer-2:
 
-1. Avvia il nodo Layer-2:
-```bash
-./start_layer2.sh
-```
+1. Chiama l'istruzione `SubmitTransaction` sul programma sequencer
+2. Specifica i dati della transazione, la commissione e la priorità
+3. Il sequencer includerà la tua transazione nel prossimo batch
 
-2. Interagisci con il Layer-2:
-```bash
-./layer2_cli.sh deposit --amount 1 --token SOL
-./layer2_cli.sh transfer --to <ADDRESS> --amount 0.5 --token SOL
-./layer2_cli.sh withdraw --amount 0.5 --token SOL
-```
+### Utilizzo di Transazioni Gasless
 
-## Test
+Per utilizzare transazioni gasless:
 
-### Test Unitari
+1. Crea una meta-transazione con i tuoi dati di transazione
+2. Firma la meta-transazione utilizzando la firma in stile EIP-712
+3. Invia la meta-transazione a un relayer
+4. Il relayer invierà la transazione per tuo conto
 
-```bash
-cargo test
-```
+## Caratteristiche di Performance
 
-### Test di Integrazione
+- **Throughput delle Transazioni**: Fino a 1000 transazioni per batch
+- **Tempo di Creazione del Batch**: Massimo 60 secondi
+- **Tempo di Finalità**: 7 giorni (periodo di contestazione)
+- **Riduzione dei Costi**: Fino a 100 volte rispetto alle transazioni L1
 
-```bash
-cargo test --test integration_test
-```
+## Sviluppo e Testing
 
-### Test di Stress
+### Sviluppo Locale
+
+Per configurare un ambiente di sviluppo locale:
+
+1. Clona il repository
+2. Installa le dipendenze
+3. Esegui la rete di test locale
+4. Distribuisci i contratti Layer-2
+
+### Testing
+
+Il repository include test completi:
+
+- Test unitari per ogni componente
+- Test di integrazione per l'intero sistema
+- Test di stress con volumi elevati di transazioni
+- Test di sicurezza utilizzando Echidna
+
+Esegui i test utilizzando:
 
 ```bash
-./stress_test.sh
+./final_test.sh
 ```
 
-## Sicurezza
+### Deployment
 
-Il sistema implementa diverse misure di sicurezza:
+Per distribuire il Layer-2 su testnet o mainnet:
 
-1. **Fraud Proof**: Consente di contestare transazioni invalide
-2. **Periodo di Contestazione**: Fornisce tempo sufficiente per verificare le transazioni
-3. **Gestione degli Errori**: Implementa meccanismi robusti per la gestione degli errori
-4. **Autorizzazioni**: Verifica le autorizzazioni per operazioni critiche
-
-## Limitazioni Attuali
-
-1. Supporto limitato per token non nativi
-2. Latenza di finalizzazione dovuta al periodo di contestazione
-3. Dipendenza dalla disponibilità di Layer-1
+```bash
+./deploy_beta.sh [testnet|mainnet]
+```
 
 ## Roadmap Futura
 
-1. Supporto per smart contract più complessi
-2. Miglioramento delle prestazioni
-3. Integrazione con altri ecosistemi
-4. Implementazione di ZK-rollup per ridurre la latenza di finalizzazione
+1. **Migrazione a ZK Rollup**: Transizione da rollup ottimistici a ZK rollup per una finalità più rapida
+2. **Integrazione Cross-Chain**: Supporto per più catene oltre a Solana
+3. **Governance DAO**: Governance decentralizzata per i parametri del protocollo
+4. **DApp Native Layer-2**: Ecosistema di applicazioni costruite specificamente per il Layer-2
 
-## Contribuire
+## Conclusione
 
-Le contribuzioni sono benvenute! Per contribuire:
-
-1. Forka il repository
-2. Crea un branch per la tua feature
-3. Commita le tue modifiche
-4. Invia una pull request
-
-## Licenza
-
-Questo progetto è rilasciato sotto licenza MIT.
+Questa soluzione Layer-2 fornisce una soluzione di scaling completa, sicura ed efficiente per Solana. Implementando rollup ottimistici con un robusto bridge, sequencer e sistema di transazioni gasless, migliora significativamente l'esperienza utente mantenendo le garanzie di sicurezza della blockchain Solana.
