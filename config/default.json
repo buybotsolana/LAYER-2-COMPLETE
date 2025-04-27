@@ -1,0 +1,26 @@
+{
+  "solana": {
+    "rpcUrl": "https://api.mainnet-beta.solana.com",
+    "wsUrl": "wss://api.mainnet-beta.solana.com"
+  },
+  "neonEvm": {
+    "programId": "NeonEVM11111111111111111111111111111111"
+  },
+  "layer2": {
+    "maxTransactionsPerBundle": 1000,
+    "targetTps": 10000,
+    "gasFeePercentage": 0.01,
+    "taxSystem": {
+      "buyTaxPercentage": 0.05,
+      "sellTaxPercentage": 0.07,
+      "transferTaxPercentage": 0.02,
+      "taxDistribution": {
+        "liquidity": 0.3,
+        "marketing": 0.2,
+        "development": 0.2,
+        "burn": 0.15,
+        "buyback": 0.15
+      }
+    }
+  }
+}

@@ -1,6 +1,6 @@
 # Layer-2 su Solana
 
-Un Optimistic Rollup che utilizza la Solana Virtual Machine (SVM) come layer di esecuzione su Ethereum.
+Un sistema Layer-2 completo per Solana con rollup ottimistico, bridge trustless, sequencer per transazioni e ottimizzazione delle fee.
 
 [![Build Status](https://img.shields.io/github/workflow/status/buybotsolana/LAYER-2-COMPLETE/CI)](https://github.com/buybotsolana/LAYER-2-COMPLETE/actions)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -8,38 +8,45 @@ Un Optimistic Rollup che utilizza la Solana Virtual Machine (SVM) come layer di 
 
 ## Panoramica del Progetto
 
-Layer-2 su Solana è una soluzione di scaling per Ethereum che utilizza la Solana Virtual Machine (SVM) come layer di esecuzione. Implementa un rollup ottimistico che eredita la sicurezza di Ethereum mentre sfrutta la velocità e l'efficienza della SVM.
+Layer-2 su Solana è una soluzione di scaling per Solana che implementa un rollup ottimistico. Il sistema eredita la sicurezza di Solana mentre offre maggiore throughput e costi ridotti.
 
 ### Caratteristiche Principali
 
-- **Alta Velocità**: Throughput di oltre 1,000 TPS, con obiettivo futuro di 10,000 TPS
-- **Basse Commissioni**: Costi di transazione ridotti rispetto a Ethereum L1
-- **Sicurezza Garantita da Ethereum**: Tutti gli stati sono ancorati su Ethereum
-- **Compatibilità con Solana**: Supporto per programmi Solana esistenti
-- **Bridge Trustless**: Trasferimento sicuro di asset tra Ethereum e il Layer-2
+- **Alta Velocità**: Throughput di oltre 10,000 TPS
+- **Basse Commissioni**: Costi di transazione ridotti rispetto a Solana L1
+- **Sicurezza Garantita da Solana**: Tutti gli stati sono ancorati su Solana
+- **Bridge Trustless**: Trasferimento sicuro di asset tra Solana e il Layer-2
+- **Transazioni Gasless**: Supporto per meta-transazioni senza gas
+- **Anti-Rug System**: Prevenzione dei rug pull e protezione degli investitori
+- **Bundle Engine**: Aggregazione di transazioni per un'elaborazione efficiente
 
 ## Architettura
 
 Il sistema è composto dai seguenti componenti principali:
 
-1. **Contratti su Ethereum (L1)**:
-   - Contratti di bridge per depositi e prelievi
-   - Sistema di commitment degli stati
-   - Meccanismo di sfida per le prove di frode
+1. **Sistema di Rollup Ottimistico**:
+   - Creazione e gestione di batch di transazioni
+   - Verifica delle transazioni e calcolo dello stato
+   - Meccanismo di challenge per contestare transazioni fraudolente
+   - Finalizzazione dei batch dopo il periodo di challenge
 
-2. **Nodi Layer-2**:
-   - Sequencer: ordina e processa le transazioni
-   - Validator: verifica le transazioni e genera prove di frode
+2. **Bridge Trustless**:
+   - Supporto per token nativi, SPL e NFT
+   - Integrazione con Wormhole per messaggi cross-chain
+   - Protezione replay tramite nonce
+   - Meccanismi di deposito e prelievo
 
-3. **Bridge Bidirezionale**:
-   - Supporto per ETH, USDC, DAI e altri token
-   - Meccanismo di deposito (L1 → L2)
-   - Meccanismo di prelievo (L2 → L1)
+3. **Sequencer per Transazioni**:
+   - Raccolta e ordinamento delle transazioni
+   - Prioritizzazione basata su gas price e altri fattori
+   - Creazione e sottomissione di batch
+   - Gestione delle transazioni scadute
 
-4. **Sistema di Prove di Frode**:
-   - Verifica dell'esecuzione corretta delle transazioni
-   - Gioco di bisection per identificare transizioni di stato invalide
-   - Integrazione con Solana Runtime in modalità deterministica
+4. **Sistema di Ottimizzazione delle Fee**:
+   - Supporto per meta-transazioni (transazioni gasless)
+   - Sistema di relayer per pagare le fee per conto degli utenti
+   - Whitelist di contratti e sussidi per utenti
+   - Pool di sussidio per sovvenzionare le fee
 
 ## Guida Rapida
 
@@ -48,7 +55,6 @@ Il sistema è composto dai seguenti componenti principali:
 - Node.js v16+
 - Rust 1.60+
 - Solana CLI
-- Ethereum client (Geth, Hardhat, ecc.)
 
 ### Installazione
 
@@ -70,11 +76,11 @@ cargo build --release
 
 # In un altro terminale, avvia il sequencer
 cd sequencer
-cargo run --release -- --ethereum-rpc http://localhost:8545 --solana-rpc http://localhost:8899
+cargo run --release -- --solana-rpc http://localhost:8899
 
 # In un altro terminale, avvia il validator
 cd validator
-cargo run --release -- --ethereum-rpc http://localhost:8545 --solana-rpc http://localhost:8899
+cargo run --release -- --solana-rpc http://localhost:8899
 ```
 
 ### Esecuzione dei Test
@@ -90,43 +96,50 @@ npm test
 # Esegui i test end-to-end
 cd e2e
 npm test
+
+# Esegui il test completo del Layer-2
+./test_layer2_core.sh
 ```
 
-### Esempio: Hello World su L2
+### Esempio: Transazione su L2
 
-```javascript
+```rust
 // Connessione al Layer-2
-const l2 = new L2Client("http://localhost:3000");
+let l2_client = L2Client::new("http://localhost:3000");
 
 // Creazione di un wallet
-const wallet = Keypair.generate();
+let wallet = Keypair::new();
 
 // Invio di una transazione
-const tx = new Transaction().add(
-  SystemProgram.transfer({
-    fromPubkey: wallet.publicKey,
-    toPubkey: recipient,
-    lamports: 1000000,
-  })
-);
+let transaction = RollupTransaction {
+    sender: wallet.pubkey(),
+    recipient: recipient_pubkey,
+    amount: 1000000,
+    data: vec![],
+    signature: wallet.sign_message(&message),
+    nonce: 1,
+    gas_price: 10,
+    gas_limit: 5,
+};
 
-const signature = await l2.sendTransaction(tx, wallet);
-console.log("Transazione inviata:", signature);
+let tx_hash = l2_client.send_transaction(transaction).await?;
+println!("Transazione inviata: {}", tx_hash);
 ```
 
 ## Documentazione
 
 Per una documentazione più dettagliata, consulta:
 
-- [Documentazione Architetturale](docs/architecture/)
-- [Riferimento API](docs/api-reference/)
-- [Guide per Sviluppatori](docs/guides/)
+- [Documentazione Italiana](documentation-it.md)
+- [Documentazione Inglese](documentation-en.md)
+- [Guida per Sviluppatori](docs/developer-guide.md)
 
 ## Roadmap
 
-- [x] Implementazione del sistema di prove di frode
-- [x] Implementazione della logica di finalizzazione
+- [x] Implementazione del sistema di rollup ottimistico
 - [x] Implementazione del bridge trustless
+- [x] Implementazione del sequencer per transazioni
+- [x] Implementazione del sistema di ottimizzazione delle fee
 - [ ] Supporto per token SPL nativi
 - [ ] Integrazione con wallet Solana esistenti
 - [ ] Supporto per composability tra programmi
