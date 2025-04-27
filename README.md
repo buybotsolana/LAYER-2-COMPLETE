@@ -1,159 +1,218 @@
-# Layer-2 su Solana
+# README - LAYER-2-COMPLETE con BuyBot Enterprise
 
-Un sistema Layer-2 completo per Solana con rollup ottimistico, bridge trustless, sequencer per transazioni e ottimizzazione delle fee.
+## Panoramica
 
-[![Build Status](https://img.shields.io/github/workflow/status/buybotsolana/LAYER-2-COMPLETE/CI)](https://github.com/buybotsolana/LAYER-2-COMPLETE/actions)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Documentation](https://img.shields.io/badge/docs-latest-brightgreen.svg)](docs/)
+Questo repository contiene l'implementazione completa del sistema LAYER-2-COMPLETE con BuyBot Enterprise integrato. Il sistema è progettato per supportare il lancio di token su Solana, con funzionalità avanzate per garantire il successo del lancio e la crescita del prezzo del token.
 
-## Panoramica del Progetto
-
-Layer-2 su Solana è una soluzione di scaling per Solana che implementa un rollup ottimistico. Il sistema eredita la sicurezza di Solana mentre offre maggiore throughput e costi ridotti.
-
-### Caratteristiche Principali
-
-- **Alta Velocità**: Throughput di oltre 10,000 TPS
-- **Basse Commissioni**: Costi di transazione ridotti rispetto a Solana L1
-- **Sicurezza Garantita da Solana**: Tutti gli stati sono ancorati su Solana
-- **Bridge Trustless**: Trasferimento sicuro di asset tra Solana e il Layer-2
-- **Transazioni Gasless**: Supporto per meta-transazioni senza gas
-- **Anti-Rug System**: Prevenzione dei rug pull e protezione degli investitori
-- **Bundle Engine**: Aggregazione di transazioni per un'elaborazione efficiente
-
-## Architettura
+## Componenti Principali
 
 Il sistema è composto dai seguenti componenti principali:
 
-1. **Sistema di Rollup Ottimistico**:
-   - Creazione e gestione di batch di transazioni
-   - Verifica delle transazioni e calcolo dello stato
-   - Meccanismo di challenge per contestare transazioni fraudolente
-   - Finalizzazione dei batch dopo il periodo di challenge
+1. **Launchpad**: Modulo per la creazione e il lancio di token, con supporto completo per presale, contribuzioni, finalizzazione e lancio.
 
-2. **Bridge Trustless**:
-   - Supporto per token nativi, SPL e NFT
-   - Integrazione con Wormhole per messaggi cross-chain
-   - Protezione replay tramite nonce
-   - Meccanismi di deposito e prelievo
+2. **BuyBot**: Sistema intelligente che supporta il lancio e la crescita del prezzo del token, composto da:
+   - **Bundle Engine**: Aggrega le transazioni in bundle per un'elaborazione efficiente
+   - **Tax System**: Gestisce le tasse sulle transazioni con funzionalità di buyback e burn
+   - **Anti-Rug System**: Valuta il rischio di rug pull e include funzionalità di Lock Liquidity
+   - **Market Maker**: Gestisce la creazione di liquidità e la stabilizzazione dei prezzi
 
-3. **Sequencer per Transazioni**:
-   - Raccolta e ordinamento delle transazioni
-   - Prioritizzazione basata su gas price e altri fattori
-   - Creazione e sottomissione di batch
-   - Gestione delle transazioni scadute
+3. **Token Contract**: Smart contract Solana con supporto BuyBot integrato, che include:
+   - Tassazione progressiva
+   - Buyback e burn automatici
+   - Protezione anti-dump
+   - Supporto al prezzo
+   - Modalità lancio dedicata
 
-4. **Sistema di Ottimizzazione delle Fee**:
-   - Supporto per meta-transazioni (transazioni gasless)
-   - Sistema di relayer per pagare le fee per conto degli utenti
-   - Whitelist di contratti e sussidi per utenti
-   - Pool di sussidio per sovvenzionare le fee
+4. **Integrazione BuyBot-Token**: Livello di integrazione che collega il BuyBot direttamente al token contract per supportare il prezzo durante e dopo il lancio.
 
-## Guida Rapida
+## Funzionalità Principali
 
-### Prerequisiti
+### Launchpad
+- Creazione di token con configurazione tokenomics
+- Gestione delle presale con contribuzioni
+- Finalizzazione delle presale con integrazione del Bundle Engine
+- Blocco della liquidità tramite Anti-Rug System
+- Creazione di strategie di market making per la liquidità
 
-- Node.js v16+
-- Rust 1.60+
-- Solana CLI
+### BuyBot
+- **Bundle Engine**:
+  - Aggregazione di transazioni in bundle
+  - Prioritizzazione intelligente delle transazioni
+  - Modalità lancio dedicata
+  - Gestione robusta degli errori
 
-### Installazione
+- **Tax System**:
+  - Tasse configurabili per acquisti, vendite e trasferimenti
+  - Distribuzione automatica delle tasse
+  - Buyback e burn automatici
+  - Modalità lancio con tasse ottimizzate
 
-```bash
-# Clona il repository
-git clone https://github.com/buybotsolana/LAYER-2-COMPLETE.git
-cd LAYER-2-COMPLETE
+- **Anti-Rug System**:
+  - Valutazione del rischio di token
+  - Blocco della liquidità
+  - Verifica del team
+  - Fondo assicurativo
 
-# Installa le dipendenze
-npm install
-cargo build --release
+- **Market Maker**:
+  - Creazione e gestione della liquidità
+  - Stabilizzazione del prezzo
+  - Spread dinamici
+  - Modalità lancio con parametri ottimizzati
+
+### Token Contract
+- Tassazione progressiva che aumenta per vendite più grandi
+- Buyback e burn automatici
+- Protezione anti-dump per prevenire crolli di prezzo
+- Supporto al prezzo con interventi automatici
+- Modalità lancio con tasse di vendita aumentate
+
+### Integrazione BuyBot-Token
+- Collegamento diretto tra BuyBot e token contract
+- Attivazione automatica del BuyBot durante il lancio
+- Interventi di supporto al prezzo
+- Statistiche dettagliate
+
+## Come Utilizzare
+
+### Inizializzazione del Sistema
+
+```typescript
+import { createLayer2System } from './src/index';
+import { Keypair } from '@solana/web3.js';
+
+// Crea un keypair per l'operatore
+const operatorKeypair = Keypair.generate();
+
+// Inizializza il sistema Layer-2 con BuyBot
+const layer2System = createLayer2System(
+  'https://api.mainnet-beta.solana.com',
+  operatorKeypair
+);
+
+// Accedi ai componenti
+const { bundleEngine, taxSystem, antiRugSystem, marketMaker, launchpad } = layer2System;
 ```
 
-### Avvio dell'Ambiente Locale
+### Creazione e Lancio di un Token
 
-```bash
-# Avvia l'ambiente di test locale
-./scripts/setup-local-testnet.sh
+```typescript
+// Crea un nuovo token
+const tokenAddress = await launchpad.createToken({
+  name: 'My Token',
+  symbol: 'MTK',
+  decimals: 9,
+  initialSupply: BigInt(1000000000000),
+  maxSupply: BigInt(1000000000000),
+  owner: operatorKeypair.publicKey.toString(),
+  tokenomics: {
+    team: 10,
+    marketing: 10,
+    development: 10,
+    liquidity: 30,
+    presale: 40
+  },
+  taxes: {
+    buy: 5,
+    sell: 10,
+    transfer: 2,
+    distribution: {
+      liquidity: 30,
+      marketing: 20,
+      development: 20,
+      burn: 15,
+      buyback: 15
+    }
+  },
+  antiRugConfig: {
+    liquidityLockPeriod: 180 * 24 * 60 * 60, // 180 giorni
+    maxWalletSize: 2,
+    maxTransactionSize: 1
+  },
+  buybotEnabled: true
+});
 
-# In un altro terminale, avvia il sequencer
-cd sequencer
-cargo run --release -- --solana-rpc http://localhost:8899
+// Crea una presale per il token
+const presaleId = await launchpad.createPresale({
+  tokenAddress,
+  softCap: BigInt(100000000000),
+  hardCap: BigInt(200000000000),
+  minContribution: BigInt(1000000000),
+  maxContribution: BigInt(10000000000),
+  presalePrice: 0.0005,
+  listingPrice: 0.001,
+  startTime: Date.now() + 86400000, // Inizia tra 1 giorno
+  endTime: Date.now() + 604800000, // Termina tra 7 giorni
+  liquidityPercentage: 80,
+  liquidityLockPeriod: 180 * 24 * 60 * 60 // 180 giorni
+});
 
-# In un altro terminale, avvia il validator
-cd validator
-cargo run --release -- --solana-rpc http://localhost:8899
+// Finalizza la presale e lancia il token
+await launchpad.finalizePresale(presaleId);
+await launchpad.launchToken(tokenAddress);
+
+// Crea un'integrazione tra BuyBot e token
+const tokenIntegration = layer2System.createTokenIntegration(
+  tokenAddress,
+  'TokenProgramId111111111111111111111111111'
+);
+
+// Abilita la modalità lancio
+await tokenIntegration.enableLaunchMode(0.001); // Prezzo di listing
 ```
 
-### Esecuzione dei Test
+### Supporto al Prezzo
 
-```bash
-# Esegui i test unitari
-cargo test --all
+```typescript
+// Esegui un buyback
+await tokenIntegration.executeBuyback(BigInt(1000000000));
 
-# Esegui i test di integrazione
-cd integration
-npm test
+// Esegui un burn
+await tokenIntegration.executeBurn(BigInt(500000000));
 
-# Esegui i test end-to-end
-cd e2e
-npm test
+// Esegui un intervento di supporto al prezzo
+await tokenIntegration.executePriceSupport(BigInt(1000000000));
 
-# Esegui il test completo del Layer-2
-./test_layer2_core.sh
+// Ottieni le statistiche del BuyBot
+const stats = await tokenIntegration.getBuybotStatistics();
+console.log(stats);
 ```
 
-### Esempio: Transazione su L2
+## Struttura del Progetto
 
-```rust
-// Connessione al Layer-2
-let l2_client = L2Client::new("http://localhost:3000");
-
-// Creazione di un wallet
-let wallet = Keypair::new();
-
-// Invio di una transazione
-let transaction = RollupTransaction {
-    sender: wallet.pubkey(),
-    recipient: recipient_pubkey,
-    amount: 1000000,
-    data: vec![],
-    signature: wallet.sign_message(&message),
-    nonce: 1,
-    gas_price: 10,
-    gas_limit: 5,
-};
-
-let tx_hash = l2_client.send_transaction(transaction).await?;
-println!("Transazione inviata: {}", tx_hash);
+```
+LAYER-2-COMPLETE/
+├── src/
+│   ├── bundle_engine.ts
+│   ├── tax_system.ts
+│   ├── anti_rug_system.ts
+│   ├── market_maker.ts
+│   ├── launchpad.ts
+│   ├── buybot_token_integration.ts
+│   ├── index.ts
+│   └── utils/
+│       └── logger.ts
+├── onchain/
+│   └── src/
+│       ├── lib.rs
+│       ├── processor.rs
+│       └── token_contract.rs
+└── tests/
+    └── buybot_token_integration.test.ts
 ```
 
-## Documentazione
+## Miglioramenti a Livello Enterprise
 
-Per una documentazione più dettagliata, consulta:
+Questa implementazione include diversi miglioramenti a livello Enterprise rispetto al codice originale:
 
-- [Documentazione Italiana](documentation-it.md)
-- [Documentazione Inglese](documentation-en.md)
-- [Guida per Sviluppatori](docs/developer-guide.md)
+1. **Architettura Modulare**: Componenti ben definiti con interfacce standardizzate
+2. **Gestione Robusta degli Errori**: Recupero automatico e gestione degli errori in tutti i componenti
+3. **Logging Completo**: Sistema di logging dettagliato per il monitoraggio e il debugging
+4. **Test Completi**: Suite di test per verificare il corretto funzionamento di tutti i componenti
+5. **Scalabilità**: Progettato per gestire volumi elevati di transazioni
+6. **Sicurezza**: Meccanismi avanzati per proteggere gli investitori e prevenire rug pull
+7. **Configurabilità**: Parametri configurabili per adattarsi a diverse esigenze
+8. **Documentazione**: Documentazione completa per tutti i componenti e le funzionalità
 
-## Roadmap
+## Conclusione
 
-- [x] Implementazione del sistema di rollup ottimistico
-- [x] Implementazione del bridge trustless
-- [x] Implementazione del sequencer per transazioni
-- [x] Implementazione del sistema di ottimizzazione delle fee
-- [ ] Supporto per token SPL nativi
-- [ ] Integrazione con wallet Solana esistenti
-- [ ] Supporto per composability tra programmi
-- [ ] Mainnet beta
-
-## Contribuire
-
-Siamo aperti ai contributi! Per favore, leggi le [linee guida per contribuire](CONTRIBUTING.md) prima di inviare pull request.
-
-## Licenza
-
-Questo progetto è rilasciato sotto la licenza MIT. Vedi il file [LICENSE](LICENSE) per i dettagli.
-
-## Contatti
-
-- GitHub: [buybotsolana](https://github.com/buybotsolana)
-- Email: buybotsolana@tech-center.com
+Il sistema LAYER-2-COMPLETE con BuyBot Enterprise è una soluzione completa per il lancio di token su Solana, con funzionalità avanzate per garantire il successo del lancio e la crescita del prezzo del token. Il sistema è progettato per essere facile da usare, sicuro e affidabile, con un'architettura modulare che permette di adattarlo a diverse esigenze.
