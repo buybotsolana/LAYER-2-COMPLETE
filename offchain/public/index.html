@@ -1,0 +1,775 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Solana Layer 2 Metrics Dashboard</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background-color: #f8f9fa;
+      padding-top: 20px;
+    }
+    .card {
+      border-radius: 10px;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+      margin-bottom: 20px;
+      border: none;
+    }
+    .card-header {
+      background-color: #4e73df;
+      color: white;
+      border-radius: 10px 10px 0 0 !important;
+      font-weight: 600;
+    }
+    .metric-value {
+      font-size: 2rem;
+      font-weight: 700;
+      color: #5a5c69;
+    }
+    .metric-label {
+      font-size: 0.8rem;
+      color: #858796;
+      text-transform: uppercase;
+    }
+    .chart-container {
+      position: relative;
+      height: 300px;
+      width: 100%;
+    }
+    .status-indicator {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      margin-right: 5px;
+    }
+    .status-healthy {
+      background-color: #1cc88a;
+    }
+    .status-warning {
+      background-color: #f6c23e;
+    }
+    .status-error {
+      background-color: #e74a3b;
+    }
+    .component-card {
+      transition: all 0.3s ease;
+    }
+    .component-card:hover {
+      transform: translateY(-5px);
+      box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15);
+    }
+    .navbar-brand {
+      font-weight: 700;
+      color: #4e73df !important;
+    }
+    .nav-tabs .nav-link.active {
+      color: #4e73df;
+      font-weight: 600;
+    }
+    .tab-content {
+      padding: 20px 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <nav class="navbar navbar-expand-lg navbar-light bg-white mb-4 rounded shadow-sm">
+      <div class="container-fluid">
+        <a class="navbar-brand" href="#">Solana Layer 2 Metrics Dashboard</a>
+        <div class="d-flex">
+          <span class="navbar-text me-3">
+            <span id="connection-status" class="status-indicator status-error"></span>
+            <span id="connection-text">Disconnected</span>
+          </span>
+          <button id="refresh-btn" class="btn btn-sm btn-outline-primary">Refresh Data</button>
+        </div>
+      </div>
+    </nav>
+
+    <div class="row mb-4">
+      <div class="col-md-3">
+        <div class="card">
+          <div class="card-body text-center">
+            <div class="metric-label">Transactions Per Second</div>
+            <div id="tps-value" class="metric-value">0</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="card">
+          <div class="card-body text-center">
+            <div class="metric-label">Avg Latency (ms)</div>
+            <div id="latency-value" class="metric-value">0</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="card">
+          <div class="card-body text-center">
+            <div class="metric-label">Queue Size</div>
+            <div id="queue-value" class="metric-value">0</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="card">
+          <div class="card-body text-center">
+            <div class="metric-label">Success Rate (%)</div>
+            <div id="success-rate-value" class="metric-value">100</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <ul class="nav nav-tabs" id="myTab" role="tablist">
+      <li class="nav-item" role="presentation">
+        <button class="nav-link active" id="charts-tab" data-bs-toggle="tab" data-bs-target="#charts" type="button" role="tab" aria-controls="charts" aria-selected="true">Charts</button>
+      </li>
+      <li class="nav-item" role="presentation">
+        <button class="nav-link" id="components-tab" data-bs-toggle="tab" data-bs-target="#components" type="button" role="tab" aria-controls="components" aria-selected="false">Components</button>
+      </li>
+      <li class="nav-item" role="presentation">
+        <button class="nav-link" id="analysis-tab" data-bs-toggle="tab" data-bs-target="#analysis" type="button" role="tab" aria-controls="analysis" aria-selected="false">Analysis</button>
+      </li>
+    </ul>
+    
+    <div class="tab-content" id="myTabContent">
+      <div class="tab-pane fade show active" id="charts" role="tabpanel" aria-labelledby="charts-tab">
+        <div class="row">
+          <div class="col-md-6">
+            <div class="card">
+              <div class="card-header">
+                Throughput (TPS)
+              </div>
+              <div class="card-body">
+                <div class="chart-container">
+                  <canvas id="tps-chart"></canvas>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="card">
+              <div class="card-header">
+                Latency (ms)
+              </div>
+              <div class="card-body">
+                <div class="chart-container">
+                  <canvas id="latency-chart"></canvas>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="col-md-6">
+            <div class="card">
+              <div class="card-header">
+                Queue Size
+              </div>
+              <div class="card-body">
+                <div class="chart-container">
+                  <canvas id="queue-chart"></canvas>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="card">
+              <div class="card-header">
+                Success Rate (%)
+              </div>
+              <div class="card-body">
+                <div class="chart-container">
+                  <canvas id="success-chart"></canvas>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="tab-pane fade" id="components" role="tabpanel" aria-labelledby="components-tab">
+        <div class="row">
+          <div class="col-md-6">
+            <div class="card component-card">
+              <div class="card-header d-flex justify-content-between align-items-center">
+                <span>Sequencer</span>
+                <span id="sequencer-status" class="status-indicator status-healthy"></span>
+              </div>
+              <div class="card-body">
+                <table class="table table-sm">
+                  <tbody>
+                    <tr>
+                      <td>Active Workers</td>
+                      <td id="sequencer-workers">0</td>
+                    </tr>
+                    <tr>
+                      <td>Pending Transactions</td>
+                      <td id="sequencer-pending">0</td>
+                    </tr>
+                    <tr>
+                      <td>Processed Batches</td>
+                      <td id="sequencer-batches">0</td>
+                    </tr>
+                    <tr>
+                      <td>Avg Batch Processing Time (ms)</td>
+                      <td id="sequencer-batch-time">0</td>
+                    </tr>
+                    <tr>
+                      <td>Total Processed</td>
+                      <td id="sequencer-total">0</td>
+                    </tr>
+                    <tr>
+                      <td>Throughput (TPS)</td>
+                      <td id="sequencer-throughput">0</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="card component-card">
+              <div class="card-header d-flex justify-content-between align-items-center">
+                <span>Bridge</span>
+                <span id="bridge-status" class="status-indicator status-healthy"></span>
+              </div>
+              <div class="card-body">
+                <table class="table table-sm">
+                  <tbody>
+                    <tr>
+                      <td>Pending Deposits</td>
+                      <td id="bridge-deposits">0</td>
+                    </tr>
+                    <tr>
+                      <td>Pending Withdrawals</td>
+                      <td id="bridge-withdrawals">0</td>
+                    </tr>
+                    <tr>
+                      <td>Successful Transfers</td>
+                      <td id="bridge-successful">0</td>
+                    </tr>
+                    <tr>
+                      <td>Failed Transfers</td>
+                      <td id="bridge-failed">0</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="row mt-4">
+          <div class="col-md-6">
+            <div class="card component-card">
+              <div class="card-header d-flex justify-content-between align-items-center">
+                <span>Relayer</span>
+                <span id="relayer-status" class="status-indicator status-healthy"></span>
+              </div>
+              <div class="card-body">
+                <table class="table table-sm">
+                  <tbody>
+                    <tr>
+                      <td>Pending Messages</td>
+                      <td id="relayer-pending">0</td>
+                    </tr>
+                    <tr>
+                      <td>Processed Messages</td>
+                      <td id="relayer-processed">0</td>
+                    </tr>
+                    <tr>
+                      <td>Failed Messages</td>
+                      <td id="relayer-failed">0</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="card component-card">
+              <div class="card-header d-flex justify-content-between align-items-center">
+                <span>Recovery</span>
+                <span id="recovery-status" class="status-indicator status-healthy"></span>
+              </div>
+              <div class="card-body">
+                <table class="table table-sm">
+                  <tbody>
+                    <tr>
+                      <td>Total Discrepancies</td>
+                      <td id="recovery-discrepancies">0</td>
+                    </tr>
+                    <tr>
+                      <td>Resolved Discrepancies</td>
+                      <td id="recovery-resolved">0</td>
+                    </tr>
+                    <tr>
+                      <td>Failed Reconciliations</td>
+                      <td id="recovery-failed">0</td>
+                    </tr>
+                    <tr>
+                      <td>Pending Reconciliations</td>
+                      <td id="recovery-pending">0</td>
+                    </tr>
+                    <tr>
+                      <td>Circuit Breaker</td>
+                      <td id="recovery-circuit">Inactive</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="tab-pane fade" id="analysis" role="tabpanel" aria-labelledby="analysis-tab">
+        <div class="row">
+          <div class="col-md-6">
+            <div class="card">
+              <div class="card-header">
+                Throughput Analysis
+              </div>
+              <div class="card-body">
+                <div class="form-group mb-3">
+                  <label for="throughput-timeframe">Timeframe</label>
+                  <select class="form-select" id="throughput-timeframe">
+                    <option value="1m">Last Minute</option>
+                    <option value="5m">Last 5 Minutes</option>
+                    <option value="1h" selected>Last Hour</option>
+                    <option value="1d">Last Day</option>
+                  </select>
+                </div>
+                <table class="table table-sm">
+                  <tbody id="throughput-analysis">
+                    <tr>
+                      <td>Average</td>
+                      <td>0 TPS</td>
+                    </tr>
+                    <tr>
+                      <td>Minimum</td>
+                      <td>0 TPS</td>
+                    </tr>
+                    <tr>
+                      <td>Maximum</td>
+                      <td>0 TPS</td>
+                    </tr>
+                    <tr>
+                      <td>Median</td>
+                      <td>0 TPS</td>
+                    </tr>
+                    <tr>
+                      <td>95th Percentile</td>
+                      <td>0 TPS</td>
+                    </tr>
+                    <tr>
+                      <td>Standard Deviation</td>
+                      <td>0 TPS</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="card">
+              <div class="card-header">
+                Latency Analysis
+              </div>
+              <div class="card-body">
+                <div class="form-group mb-3">
+                  <label for="latency-timeframe">Timeframe</label>
+                  <select class="form-select" id="latency-timeframe">
+                    <option value="1m">Last Minute</option>
+                    <option value="5m">Last 5 Minutes</option>
+                    <option value="1h" selected>Last Hour</option>
+                    <option value="1d">Last Day</option>
+                  </select>
+                </div>
+                <table class="table table-sm">
+                  <tbody id="latency-analysis">
+                    <tr>
+                      <td>Average</td>
+                      <td>0 ms</td>
+                    </tr>
+                    <tr>
+                      <td>Minimum</td>
+                      <td>0 ms</td>
+                    </tr>
+                    <tr>
+                      <td>Maximum</td>
+                      <td>0 ms</td>
+                    </tr>
+                    <tr>
+                      <td>Median</td>
+                      <td>0 ms</td>
+                    </tr>
+                    <tr>
+                      <td>95th Percentile</td>
+                      <td>0 ms</td>
+                    </tr>
+                    <tr>
+                      <td>Standard Deviation</td>
+                      <td>0 ms</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+    // Initialize Socket.IO connection
+    const socket = io();
+    
+    // Chart configuration
+    const chartOptions = {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: {
+        duration: 500
+      },
+      scales: {
+        x: {
+          type: 'time',
+          time: {
+            unit: 'minute',
+            tooltipFormat: 'HH:mm:ss'
+          },
+          title: {
+            display: true,
+            text: 'Time'
+          }
+        },
+        y: {
+          beginAtZero: true,
+          title: {
+            display: true,
+            text: 'Value'
+          }
+        }
+      },
+      plugins: {
+        legend: {
+          display: false
+        }
+      }
+    };
+    
+    // Initialize charts
+    const tpsChart = new Chart(
+      document.getElementById('tps-chart').getContext('2d'),
+      {
+        type: 'line',
+        data: {
+          datasets: [{
+            label: 'TPS',
+            data: [],
+            borderColor: '#4e73df',
+            backgroundColor: 'rgba(78, 115, 223, 0.1)',
+            borderWidth: 2,
+            fill: true,
+            tension: 0.4
+          }]
+        },
+        options: {
+          ...chartOptions,
+          scales: {
+            ...chartOptions.scales,
+            y: {
+              ...chartOptions.scales.y,
+              title: {
+                display: true,
+                text: 'Transactions Per Second'
+              }
+            }
+          }
+        }
+      }
+    );
+    
+    const latencyChart = new Chart(
+      document.getElementById('latency-chart').getContext('2d'),
+      {
+        type: 'line',
+        data: {
+          datasets: [{
+            label: 'Latency',
+            data: [],
+            borderColor: '#1cc88a',
+            backgroundColor: 'rgba(28, 200, 138, 0.1)',
+            borderWidth: 2,
+            fill: true,
+            tension: 0.4
+          }]
+        },
+        options: {
+          ...chartOptions,
+          scales: {
+            ...chartOptions.scales,
+            y: {
+              ...chartOptions.scales.y,
+              title: {
+                display: true,
+                text: 'Latency (ms)'
+              }
+            }
+          }
+        }
+      }
+    );
+    
+    const queueChart = new Chart(
+      document.getElementById('queue-chart').getContext('2d'),
+      {
+        type: 'line',
+        data: {
+          datasets: [{
+            label: 'Queue Size',
+            data: [],
+            borderColor: '#f6c23e',
+            backgroundColor: 'rgba(246, 194, 62, 0.1)',
+            borderWidth: 2,
+            fill: true,
+            tension: 0.4
+          }]
+        },
+        options: {
+          ...chartOptions,
+          scales: {
+            ...chartOptions.scales,
+            y: {
+              ...chartOptions.scales.y,
+              title: {
+                display: true,
+                text: 'Queue Size'
+              }
+            }
+          }
+        }
+      }
+    );
+    
+    const successChart = new Chart(
+      document.getElementById('success-chart').getContext('2d'),
+      {
+        type: 'line',
+        data: {
+          datasets: [{
+            label: 'Success Rate',
+            data: [],
+            borderColor: '#36b9cc',
+            backgroundColor: 'rgba(54, 185, 204, 0.1)',
+            borderWidth: 2,
+            fill: true,
+            tension: 0.4
+          }]
+        },
+        options: {
+          ...chartOptions,
+          scales: {
+            ...chartOptions.scales,
+            y: {
+              ...chartOptions.scales.y,
+              title: {
+                display: true,
+                text: 'Success Rate (%)'
+              },
+              min: 0,
+              max: 100
+            }
+          }
+        }
+      }
+    );
+    
+    // Socket.IO event handlers
+    socket.on('connect', () => {
+      document.getElementById('connection-status').className = 'status-indicator status-healthy';
+      document.getElementById('connection-text').textContent = 'Connected';
+    });
+    
+    socket.on('disconnect', () => {
+      document.getElementById('connection-status').className = 'status-indicator status-error';
+      document.getElementById('connection-text').textContent = 'Disconnected';
+    });
+    
+    socket.on('system_metrics', (metrics) => {
+      // Update dashboard values
+      document.getElementById('tps-value').textContent = metrics.tps.toFixed(2);
+      document.getElementById('latency-value').textContent = metrics.avgLatency.toFixed(2);
+      document.getElementById('queue-value').textContent = metrics.queueSize;
+      document.getElementById('success-rate-value').textContent = (metrics.successRate || 100).toFixed(2);
+      
+      // Add data to charts
+      const timestamp = new Date(metrics.lastUpdate);
+      
+      addDataToChart(tpsChart, timestamp, metrics.tps);
+      addDataToChart(latencyChart, timestamp, metrics.avgLatency);
+      addDataToChart(queueChart, timestamp, metrics.queueSize);
+      addDataToChart(successChart, timestamp, metrics.successRate || 100);
+    });
+    
+    socket.on('component_metrics', (data) => {
+      const { component, metrics } = data;
+      
+      if (component === 'sequencer') {
+        document.getElementById('sequencer-workers').textContent = metrics.activeWorkers;
+        document.getElementById('sequencer-pending').textContent = metrics.pendingTransactions;
+        document.getElementById('sequencer-batches').textContent = metrics.processedBatches;
+        document.getElementById('sequencer-batch-time').textContent = metrics.avgBatchProcessingTime.toFixed(2);
+        document.getElementById('sequencer-total').textContent = metrics.totalProcessed;
+        document.getElementById('sequencer-throughput').textContent = metrics.throughput.toFixed(2);
+        
+        updateComponentStatus('sequencer', metrics.pendingTransactions);
+      } else if (component === 'bridge') {
+        document.getElementById('bridge-deposits').textContent = metrics.pendingDeposits;
+        document.getElementById('bridge-withdrawals').textContent = metrics.pendingWithdrawals;
+        document.getElementById('bridge-successful').textContent = metrics.successfulTransfers;
+        document.getElementById('bridge-failed').textContent = metrics.failedTransfers;
+        
+        updateComponentStatus('bridge', metrics.failedTransfers);
+      } else if (component === 'relayer') {
+        document.getElementById('relayer-pending').textContent = metrics.pendingMessages;
+        document.getElementById('relayer-processed').textContent = metrics.processedMessages;
+        document.getElementById('relayer-failed').textContent = metrics.failedMessages;
+        
+        updateComponentStatus('relayer', metrics.failedMessages);
+      } else if (component === 'recovery') {
+        document.getElementById('recovery-discrepancies').textContent = metrics.totalDiscrepancies;
+        document.getElementById('recovery-resolved').textContent = metrics.resolvedDiscrepancies;
+        document.getElementById('recovery-failed').textContent = metrics.failedReconciliations;
+        document.getElementById('recovery-pending').textContent = metrics.pendingReconciliations;
+        document.getElementById('recovery-circuit').textContent = metrics.circuitBreakerActive ? 'Active' : 'Inactive';
+        
+        updateComponentStatus('recovery', metrics.circuitBreakerActive ? 1 : 0);
+      }
+    });
+    
+    socket.on('metric', (data) => {
+      // Handle individual metric updates if needed
+    });
+    
+    // Helper functions
+    function addDataToChart(chart, timestamp, value) {
+      chart.data.datasets[0].data.push({
+        x: timestamp,
+        y: value
+      });
+      
+      // Limit the number of data points to prevent performance issues
+      if (chart.data.datasets[0].data.length > 100) {
+        chart.data.datasets[0].data.shift();
+      }
+      
+      chart.update();
+    }
+    
+    function updateComponentStatus(component, value) {
+      const statusElement = document.getElementById(`${component}-status`);
+      
+      if (component === 'recovery') {
+        statusElement.className = value ? 'status-indicator status-warning' : 'status-indicator status-healthy';
+        return;
+      }
+      
+      if (value === 0) {
+        statusElement.className = 'status-indicator status-healthy';
+      } else if (value < 10) {
+        statusElement.className = 'status-indicator status-warning';
+      } else {
+        statusElement.className = 'status-indicator status-error';
+      }
+    }
+    
+    // Analysis tab functionality
+    document.getElementById('throughput-timeframe').addEventListener('change', function() {
+      fetchAnalysis('throughput', this.value);
+    });
+    
+    document.getElementById('latency-timeframe').addEventListener('change', function() {
+      fetchAnalysis('latency', this.value);
+    });
+    
+    function fetchAnalysis(type, timeframe) {
+      fetch(`/api/metrics/analysis?type=${type}&timeframe=${timeframe}`)
+        .then(response => response.json())
+        .then(data => {
+          const tableId = `${type}-analysis`;
+          const unit = type === 'latency' ? 'ms' : 'TPS';
+          
+          document.getElementById(tableId).innerHTML = `
+            <tr>
+              <td>Average</td>
+              <td>${data.avg.toFixed(2)} ${unit}</td>
+            </tr>
+            <tr>
+              <td>Minimum</td>
+              <td>${data.min.toFixed(2)} ${unit}</td>
+            </tr>
+            <tr>
+              <td>Maximum</td>
+              <td>${data.max.toFixed(2)} ${unit}</td>
+            </tr>
+            <tr>
+              <td>Median</td>
+              <td>${data.median.toFixed(2)} ${unit}</td>
+            </tr>
+            <tr>
+              <td>95th Percentile</td>
+              <td>${data.p95.toFixed(2)} ${unit}</td>
+            </tr>
+            <tr>
+              <td>Standard Deviation</td>
+              <td>${data.stdDev.toFixed(2)} ${unit}</td>
+            </tr>
+          `;
+        })
+        .catch(error => {
+          console.error(`Error fetching ${type} analysis:`, error);
+        });
+    }
+    
+    // Refresh button
+    document.getElementById('refresh-btn').addEventListener('click', function() {
+      fetch('/api/metrics/system')
+        .then(response => response.json())
+        .then(data => {
+          socket.emit('system_metrics', data);
+        })
+        .catch(error => {
+          console.error('Error refreshing data:', error);
+        });
+      
+      Object.keys(metricsData.components).forEach(component => {
+        fetch(`/api/metrics/components?component=${component}`)
+          .then(response => response.json())
+          .then(data => {
+            socket.emit('component_metrics', { component, metrics: data });
+          })
+          .catch(error => {
+            console.error(`Error refreshing ${component} data:`, error);
+          });
+      });
+      
+      fetchAnalysis('throughput', document.getElementById('throughput-timeframe').value);
+      fetchAnalysis('latency', document.getElementById('latency-timeframe').value);
+    });
+    
+    // Initialize analysis data
+    fetchAnalysis('throughput', '1h');
+    fetchAnalysis('latency', '1h');
+  </script>
+</body>
+</html>

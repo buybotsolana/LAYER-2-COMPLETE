@@ -1,0 +1,100 @@
+.asset-list {
+  margin: 2rem auto;
+  padding: 2rem;
+  background-color: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.asset-list h2 {
+  margin-top: 0;
+  color: #1a1a2e;
+  font-size: 1.8rem;
+  margin-bottom: 1.5rem;
+}
+
+.assets-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1.5rem;
+}
+
+.asset-card {
+  display: flex;
+  align-items: center;
+  padding: 1.5rem;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  transition: all 0.3s ease;
+}
+
+.asset-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+}
+
+.asset-icon {
+  margin-right: 1rem;
+}
+
+.asset-icon img {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+}
+
+.asset-details {
+  flex: 1;
+}
+
+.asset-details h3 {
+  margin: 0 0 0.5rem 0;
+  font-size: 1.2rem;
+  color: #333;
+}
+
+.asset-balance {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: #1a1a2e;
+  margin: 0.5rem 0;
+}
+
+.asset-address {
+  font-size: 0.8rem;
+  color: #888;
+  margin: 0;
+  word-break: break-all;
+}
+
+.no-assets {
+  text-align: center;
+  padding: 2rem;
+  color: #888;
+  font-style: italic;
+}
+
+.asset-list.loading {
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+}
+
+.loading-spinner {
+  color: #7b68ee;
+  font-weight: 500;
+  margin-top: 1rem;
+}
+
+@media (max-width: 768px) {
+  .asset-list {
+    padding: 1.5rem;
+    margin: 1rem;
+  }
+  
+  .assets-grid {
+    grid-template-columns: 1fr;
+  }
+}

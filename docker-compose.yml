@@ -1,0 +1,282 @@
+version: '3.8'
+
+services:
+  # Database MongoDB per il Layer-2
+  mongodb:
+    image: mongo:5.0
+    container_name: layer2-mongodb
+    restart: always
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USERNAME:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-password}
+      MONGO_INITDB_DATABASE: ${MONGO_DATABASE:-layer2}
+    volumes:
+      - mongodb_data:/data/db
+    ports:
+      - "${MONGO_PORT:-27017}:27017"
+    networks:
+      - layer2-network
+    healthcheck:
+      test: ["CMD", "mongo", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Redis per la cache e la gestione delle code
+  redis:
+    image: redis:6.2-alpine
+    container_name: layer2-redis
+    restart: always
+    command: redis-server --requirepass ${REDIS_PASSWORD:-password}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    networks:
+      - layer2-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Sequencer principale del Layer-2
+  sequencer:
+    build:
+      context: ./offchain
+      dockerfile: Dockerfile
+    image: layer2-sequencer:latest
+    container_name: layer2-sequencer
+    restart: always
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.devnet.solana.com}
+      PROGRAM_ID: ${PROGRAM_ID:-Layer2ProgramId11111111111111111111111111111111}
+      MONGODB_URI: mongodb://${MONGO_USERNAME:-admin}:${MONGO_PASSWORD:-password}@mongodb:27017/${MONGO_DATABASE:-layer2}?authSource=admin
+      REDIS_URL: redis://:${REDIS_PASSWORD:-password}@redis:6379
+      SEQUENCER_PRIVATE_KEY: ${SEQUENCER_PRIVATE_KEY}
+      MAX_BATCH_SIZE: ${MAX_BATCH_SIZE:-100}
+      BATCH_INTERVAL: ${BATCH_INTERVAL:-1000}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - sequencer_data:/app/data
+      - ./offchain:/app
+    networks:
+      - layer2-network
+    command: ["node", "layer2_system.js"]
+
+  # Worker per l'elaborazione parallela delle transazioni
+  sequencer-worker:
+    build:
+      context: ./offchain
+      dockerfile: Dockerfile
+    image: layer2-sequencer:latest
+    container_name: layer2-sequencer-worker
+    restart: always
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      sequencer:
+        condition: service_started
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.devnet.solana.com}
+      PROGRAM_ID: ${PROGRAM_ID:-Layer2ProgramId11111111111111111111111111111111}
+      MONGODB_URI: mongodb://${MONGO_USERNAME:-admin}:${MONGO_PASSWORD:-password}@mongodb:27017/${MONGO_DATABASE:-layer2}?authSource=admin
+      REDIS_URL: redis://:${REDIS_PASSWORD:-password}@redis:6379
+      WORKER_COUNT: ${WORKER_COUNT:-4}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - worker_data:/app/data
+      - ./offchain:/app
+    networks:
+      - layer2-network
+    command: ["node", "sequencer-worker.js"]
+
+  # Sequencer specifico per i depositi
+  deposit-sequencer:
+    build:
+      context: ./offchain
+      dockerfile: Dockerfile
+    image: layer2-sequencer:latest
+    container_name: layer2-deposit-sequencer
+    restart: always
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.devnet.solana.com}
+      PROGRAM_ID: ${PROGRAM_ID:-Layer2ProgramId11111111111111111111111111111111}
+      MONGODB_URI: mongodb://${MONGO_USERNAME:-admin}:${MONGO_PASSWORD:-password}@mongodb:27017/${MONGO_DATABASE:-layer2}?authSource=admin
+      REDIS_URL: redis://:${REDIS_PASSWORD:-password}@redis:6379
+      ETHEREUM_RPC_URL: ${ETHEREUM_RPC_URL:-https://rinkeby.infura.io/v3/your-api-key}
+      TOKEN_BRIDGE_ADDRESS: ${TOKEN_BRIDGE_ADDRESS:-0x1234567890123456789012345678901234567890}
+      DEPOSIT_POLL_INTERVAL: ${DEPOSIT_POLL_INTERVAL:-5000}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - deposit_data:/app/data
+      - ./offchain:/app
+    networks:
+      - layer2-network
+    command: ["node", "deposit_sequencer.js"]
+
+  # Sequencer specifico per i prelievi
+  withdrawal-sequencer:
+    build:
+      context: ./offchain
+      dockerfile: Dockerfile
+    image: layer2-sequencer:latest
+    container_name: layer2-withdrawal-sequencer
+    restart: always
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.devnet.solana.com}
+      PROGRAM_ID: ${PROGRAM_ID:-Layer2ProgramId11111111111111111111111111111111}
+      MONGODB_URI: mongodb://${MONGO_USERNAME:-admin}:${MONGO_PASSWORD:-password}@mongodb:27017/${MONGO_DATABASE:-layer2}?authSource=admin
+      REDIS_URL: redis://:${REDIS_PASSWORD:-password}@redis:6379
+      ETHEREUM_RPC_URL: ${ETHEREUM_RPC_URL:-https://rinkeby.infura.io/v3/your-api-key}
+      WITHDRAWAL_BRIDGE_ADDRESS: ${WITHDRAWAL_BRIDGE_ADDRESS:-0x0987654321098765432109876543210987654321}
+      VALIDATOR_PRIVATE_KEY: ${VALIDATOR_PRIVATE_KEY}
+      WITHDRAWAL_POLL_INTERVAL: ${WITHDRAWAL_POLL_INTERVAL:-5000}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - withdrawal_data:/app/data
+      - ./offchain:/app
+    networks:
+      - layer2-network
+    command: ["node", "withdrawal_sequencer.js"]
+
+  # API REST per il Layer-2
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    image: layer2-api:latest
+    container_name: layer2-api
+    restart: always
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: ${API_PORT:-3000}
+      SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.devnet.solana.com}
+      PROGRAM_ID: ${PROGRAM_ID:-Layer2ProgramId11111111111111111111111111111111}
+      MONGODB_URI: mongodb://${MONGO_USERNAME:-admin}:${MONGO_PASSWORD:-password}@mongodb:27017/${MONGO_DATABASE:-layer2}?authSource=admin
+      REDIS_URL: redis://:${REDIS_PASSWORD:-password}@redis:6379
+      JWT_SECRET: ${JWT_SECRET:-your-jwt-secret}
+      RATE_LIMIT_WINDOW: ${RATE_LIMIT_WINDOW:-60000}
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-100}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${API_PORT:-3000}:3000"
+    volumes:
+      - api_data:/app/data
+      - ./api:/app
+    networks:
+      - layer2-network
+    command: ["node", "server.js"]
+
+  # Prometheus per il monitoraggio
+  prometheus:
+    image: prom/prometheus:v2.30.3
+    container_name: layer2-prometheus
+    restart: always
+    volumes:
+      - ./monitoring/prometheus_config.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    networks:
+      - layer2-network
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+
+  # Grafana per la visualizzazione delle metriche
+  grafana:
+    image: grafana/grafana:8.2.2
+    container_name: layer2-grafana
+    restart: always
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    networks:
+      - layer2-network
+
+  # Servizio di notifica per gli eventi critici
+  notifier:
+    build:
+      context: ./notifier
+      dockerfile: Dockerfile
+    image: layer2-notifier:latest
+    container_name: layer2-notifier
+    restart: always
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      MONGODB_URI: mongodb://${MONGO_USERNAME:-admin}:${MONGO_PASSWORD:-password}@mongodb:27017/${MONGO_DATABASE:-layer2}?authSource=admin
+      REDIS_URL: redis://:${REDIS_PASSWORD:-password}@redis:6379
+      SMTP_HOST: ${SMTP_HOST:-smtp.example.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-user}
+      SMTP_PASS: ${SMTP_PASS:-password}
+      NOTIFICATION_EMAIL: ${NOTIFICATION_EMAIL:-admin@example.com}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - notifier_data:/app/data
+      - ./notifier:/app
+    networks:
+      - layer2-network
+    command: ["node", "notifier.js"]
+
+networks:
+  layer2-network:
+    driver: bridge
+
+volumes:
+  mongodb_data:
+  redis_data:
+  sequencer_data:
+  worker_data:
+  deposit_data:
+  withdrawal_data:
+  api_data:
+  prometheus_data:
+  grafana_data:
+  notifier_data:

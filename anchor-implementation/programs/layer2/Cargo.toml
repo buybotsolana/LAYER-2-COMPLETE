@@ -1,0 +1,28 @@
+[package]
+name = "layer2"
+version = "0.1.0"
+description = "Layer-2 solution for Solana with BuyBot integration"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "layer2"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+
+[dependencies]
+anchor-lang = "0.28.0"
+anchor-spl = "0.28.0"
+solana-program = "1.14.10"
+borsh = "0.9.3"
+thiserror = "1.0.38"
+wormhole-anchor-sdk = "0.0.1"
+
+[dev-dependencies]
+solana-program-test = "1.14.10"
+solana-sdk = "1.14.10"

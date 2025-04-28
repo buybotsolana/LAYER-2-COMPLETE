@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LAYER-2 API Documentation</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@4.5.0/swagger-ui.css" />
+  <link rel="icon" type="image/png" href="https://unpkg.com/swagger-ui-dist@4.5.0/favicon-32x32.png" sizes="32x32" />
+  <link rel="icon" type="image/png" href="https://unpkg.com/swagger-ui-dist@4.5.0/favicon-16x16.png" sizes="16x16" />
+  <style>
+    html {
+      box-sizing: border-box;
+      overflow: -moz-scrollbars-vertical;
+      overflow-y: scroll;
+    }
+    
+    *,
+    *:before,
+    *:after {
+      box-sizing: inherit;
+    }
+    
+    body {
+      margin: 0;
+      background: #fafafa;
+    }
+    
+    .swagger-ui .topbar {
+      background-color: #24292e;
+    }
+    
+    .swagger-ui .topbar .download-url-wrapper .select-label select {
+      border: 2px solid #4a9df5;
+    }
+    
+    .swagger-ui .info .title {
+      color: #3b4151;
+    }
+    
+    .swagger-ui .scheme-container {
+      background-color: #f7f7f7;
+    }
+    
+    .swagger-ui .btn.execute {
+      background-color: #4a9df5;
+    }
+    
+    .swagger-ui .btn.authorize {
+      background-color: #4a9df5;
+      color: #fff;
+    }
+    
+    .swagger-ui .opblock.opblock-get .opblock-summary-method {
+      background-color: #61affe;
+    }
+    
+    .swagger-ui .opblock.opblock-post .opblock-summary-method {
+      background-color: #49cc90;
+    }
+    
+    .swagger-ui .opblock.opblock-delete .opblock-summary-method {
+      background-color: #f93e3e;
+    }
+    
+    .swagger-ui .opblock.opblock-put .opblock-summary-method {
+      background-color: #fca130;
+    }
+    
+    .swagger-ui .opblock.opblock-patch .opblock-summary-method {
+      background-color: #50e3c2;
+    }
+    
+    .swagger-ui .opblock.opblock-head .opblock-summary-method {
+      background-color: #9012fe;
+    }
+    
+    .swagger-ui .opblock.opblock-options .opblock-summary-method {
+      background-color: #0d5aa7;
+    }
+    
+    .header {
+      background-color: #24292e;
+      color: white;
+      padding: 20px;
+      text-align: center;
+    }
+    
+    .header h1 {
+      margin: 0;
+      font-size: 24px;
+    }
+    
+    .header p {
+      margin: 10px 0 0;
+      font-size: 16px;
+      opacity: 0.8;
+    }
+    
+    .footer {
+      background-color: #f7f7f7;
+      padding: 20px;
+      text-align: center;
+      font-size: 14px;
+      color: #666;
+      border-top: 1px solid #ddd;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>LAYER-2 API Documentation</h1>
+    <p>Interactive documentation for the LAYER-2 system on Solana</p>
+  </div>
+
+  <div id="swagger-ui"></div>
+
+  <div class="footer">
+    <p>&copy; 2025 LAYER-2 Team. All rights reserved.</p>
+    <p>Version 1.0.0</p>
+  </div>
+
+  <script src="https://unpkg.com/swagger-ui-dist@4.5.0/swagger-ui-bundle.js"></script>
+  <script src="https://unpkg.com/swagger-ui-dist@4.5.0/swagger-ui-standalone-preset.js"></script>
+  <script>
+    window.onload = function() {
+      // Begin Swagger UI call region
+      const ui = SwaggerUIBundle({
+        url: "openapi.json",
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        presets: [
+          SwaggerUIBundle.presets.apis,
+          SwaggerUIStandalonePreset
+        ],
+        plugins: [
+          SwaggerUIBundle.plugins.DownloadUrl
+        ],
+        layout: "StandaloneLayout",
+        tagsSorter: "alpha",
+        operationsSorter: "alpha",
+        docExpansion: "none",
+        defaultModelsExpandDepth: 1,
+        defaultModelExpandDepth: 1,
+        defaultModelRendering: "model",
+        showExtensions: true,
+        showCommonExtensions: true,
+        supportedSubmitMethods: ["get", "post", "put", "delete", "patch", "head", "options"],
+        oauth2RedirectUrl: window.location.origin + "/oauth2-redirect.html"
+      });
+      
+      // End Swagger UI call region
+      window.ui = ui;
+    };
+  </script>
+</body>
+</html>
