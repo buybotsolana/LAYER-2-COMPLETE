@@ -1,102 +1,103 @@
-# README - LAYER-2-COMPLETE con BuyBot Enterprise
+# README - LAYER-2-COMPLETE
 
-## Panoramica
+## Overview
 
-Questo repository contiene l'implementazione completa del sistema LAYER-2-COMPLETE con BuyBot Enterprise integrato. Il sistema è progettato per supportare il lancio di token su Solana, con funzionalità avanzate per garantire il successo del lancio e la crescita del prezzo del token.
+This repository contains the complete implementation of the LAYER-2-COMPLETE system with integrated BuyBot Enterprise. The system is designed to support token launches on Solana, with advanced features to ensure launch success and token price growth.
 
-## Componenti Principali
+## Main Components
 
-Il sistema è composto dai seguenti componenti principali:
+The system consists of the following main components:
 
-1. **Launchpad**: Modulo per la creazione e il lancio di token, con supporto completo per presale, contribuzioni, finalizzazione e lancio.
+Launchpad: Module for creating and launching tokens, with full support for presales, contributions, finalization, and launch.
 
-2. **BuyBot**: Sistema intelligente che supporta il lancio e la crescita del prezzo del token, composto da:
-   - **Bundle Engine**: Aggrega le transazioni in bundle per un'elaborazione efficiente
-   - **Tax System**: Gestisce le tasse sulle transazioni con funzionalità di buyback e burn
-   - **Anti-Rug System**: Valuta il rischio di rug pull e include funzionalità di Lock Liquidity
-   - **Market Maker**: Gestisce la creazione di liquidità e la stabilizzazione dei prezzi
+BuyBot: Intelligent system that supports the launch and growth of the token price, composed of:
+•	Bundle Engine: Aggregates transactions into bundles for efficient processing.
+•	Tax System: Manages transaction taxes with buyback and burn functionalities.
+•	Anti-Rug System: Assesses rug pull risk and includes Lock Liquidity features.
+•	Market Maker: Manages liquidity creation and price stabilization.
 
-3. **Token Contract**: Smart contract Solana con supporto BuyBot integrato, che include:
-   - Tassazione progressiva
-   - Buyback e burn automatici
-   - Protezione anti-dump
-   - Supporto al prezzo
-   - Modalità lancio dedicata
+Token Contract: Solana smart contract with integrated BuyBot support, which includes:
+•	Progressive taxation
+•	Automatic buyback and burn
+•	Anti-dump protection
+•	Price support
+•	Dedicated launch mode
 
-4. **Integrazione BuyBot-Token**: Livello di integrazione che collega il BuyBot direttamente al token contract per supportare il prezzo durante e dopo il lancio.
+BuyBot-Token Integration: Integration layer that directly links the BuyBot to the token contract to support the price during and after the launch.
 
-## Funzionalità Principali
+Main Features
+Launchpad
+•	Token creation with tokenomics configuration
+•	Presale management with contributions
+•	Presale finalization with Bundle Engine integration
+•	Liquidity locking via Anti-Rug System
+•	Creation of market-making strategies for liquidity
 
-### Launchpad
-- Creazione di token con configurazione tokenomics
-- Gestione delle presale con contribuzioni
-- Finalizzazione delle presale con integrazione del Bundle Engine
-- Blocco della liquidità tramite Anti-Rug System
-- Creazione di strategie di market making per la liquidità
+BuyBot
+•	Bundle Engine:
+–	Aggregation of transactions into bundles
+–	Intelligent transaction prioritization
+–	Dedicated launch mode
+–	Robust error handling
 
-### BuyBot
-- **Bundle Engine**:
-  - Aggregazione di transazioni in bundle
-  - Prioritizzazione intelligente delle transazioni
-  - Modalità lancio dedicata
-  - Gestione robusta degli errori
+•	Tax System:
+–	Configurable taxes for buys, sells, and transfers
+–	Automatic tax distribution
+–	Automatic buyback and burn
+–	Launch mode with optimized taxes
 
-- **Tax System**:
-  - Tasse configurabili per acquisti, vendite e trasferimenti
-  - Distribuzione automatica delle tasse
-  - Buyback e burn automatici
-  - Modalità lancio con tasse ottimizzate
+•	Anti-Rug System:
+–	Token risk assessment
+–	Liquidity locking
+–	Team verification
+–	Insurance fund
 
-- **Anti-Rug System**:
-  - Valutazione del rischio di token
-  - Blocco della liquidità
-  - Verifica del team
-  - Fondo assicurativo
+•	Market Maker:
+–	Liquidity creation and management
+–	Price stabilization
+–	Dynamic spreads
+–	Launch mode with optimized parameters
 
-- **Market Maker**:
-  - Creazione e gestione della liquidità
-  - Stabilizzazione del prezzo
-  - Spread dinamici
-  - Modalità lancio con parametri ottimizzati
+Token Contract
+•	Progressive taxation that increases for larger sales
+•	Automatic buyback and burn
+•	Anti-dump protection to prevent price crashes
+•	Price support with automatic interventions
+•	Launch mode with increased sales taxes
 
-### Token Contract
-- Tassazione progressiva che aumenta per vendite più grandi
-- Buyback e burn automatici
-- Protezione anti-dump per prevenire crolli di prezzo
-- Supporto al prezzo con interventi automatici
-- Modalità lancio con tasse di vendita aumentate
+BuyBot-Token Integration
+•	Direct link between BuyBot and token contract
+•	Automatic BuyBot activation during launch
+•	Price support interventions
+•	Detailed statistics
 
-### Integrazione BuyBot-Token
-- Collegamento diretto tra BuyBot e token contract
-- Attivazione automatica del BuyBot durante il lancio
-- Interventi di supporto al prezzo
-- Statistiche dettagliate
 
-## Come Utilizzare
+## How to Use
 
-### Inizializzazione del Sistema
+System Initialization
+
 
 ```typescript
 import { createLayer2System } from './src/index';
 import { Keypair } from '@solana/web3.js';
 
-// Crea un keypair per l'operatore
+// Create a keypair for the operator
 const operatorKeypair = Keypair.generate();
 
-// Inizializza il sistema Layer-2 con BuyBot
+// Initialize the Layer-2 system with BuyBot
 const layer2System = createLayer2System(
   'https://api.mainnet-beta.solana.com',
   operatorKeypair
 );
 
-// Accedi ai componenti
+// Access the components
 const { bundleEngine, taxSystem, antiRugSystem, marketMaker, launchpad } = layer2System;
 ```
 
-### Creazione e Lancio di un Token
+### Token Creation and Launch
 
 ```typescript
-// Crea un nuovo token
+// Create a new token
 const tokenAddress = await launchpad.createToken({
   name: 'My Token',
   symbol: 'MTK',
@@ -131,7 +132,7 @@ const tokenAddress = await launchpad.createToken({
   buybotEnabled: true
 });
 
-// Crea una presale per il token
+// Create a presale for the token
 const presaleId = await launchpad.createPresale({
   tokenAddress,
   softCap: BigInt(100000000000),
@@ -146,38 +147,38 @@ const presaleId = await launchpad.createPresale({
   liquidityLockPeriod: 180 * 24 * 60 * 60 // 180 giorni
 });
 
-// Finalizza la presale e lancia il token
+// Finalize the presale and launch the token
 await launchpad.finalizePresale(presaleId);
 await launchpad.launchToken(tokenAddress);
 
-// Crea un'integrazione tra BuyBot e token
+// Create an integration between BuyBot and token
 const tokenIntegration = layer2System.createTokenIntegration(
   tokenAddress,
   'TokenProgramId111111111111111111111111111'
 );
 
-// Abilita la modalità lancio
+// Enable launch mode
 await tokenIntegration.enableLaunchMode(0.001); // Prezzo di listing
 ```
 
-### Supporto al Prezzo
+### Price Support
 
 ```typescript
-// Esegui un buyback
+// Execute a buyback
 await tokenIntegration.executeBuyback(BigInt(1000000000));
 
-// Esegui un burn
+// Execute a burn
 await tokenIntegration.executeBurn(BigInt(500000000));
 
-// Esegui un intervento di supporto al prezzo
+// Execute a price support intervention
 await tokenIntegration.executePriceSupport(BigInt(1000000000));
 
-// Ottieni le statistiche del BuyBot
+// Get BuyBot statistics
 const stats = await tokenIntegration.getBuybotStatistics();
 console.log(stats);
 ```
 
-## Struttura del Progetto
+## Project Structure
 
 ```
 LAYER-2-COMPLETE/
@@ -200,19 +201,18 @@ LAYER-2-COMPLETE/
     └── buybot_token_integration.test.ts
 ```
 
-## Miglioramenti a Livello Enterprise
+## Enterprise-Level Improvements
+This implementation includes several Enterprise-level improvements over the original code:
 
-Questa implementazione include diversi miglioramenti a livello Enterprise rispetto al codice originale:
+•	Modular Architecture: Well-defined components with standardized interfaces
+•	Robust Error Handling: Automatic recovery and error handling in all components
+•	Comprehensive Logging: Detailed logging system for monitoring and debugging
+•	Complete Tests: Test suite to verify the correct functioning of all components
+•	Scalability: Designed to handle high transaction volumes
+•	Security: Advanced mechanisms to protect investors and prevent rug pulls
+•	Configurability: Configurable parameters to adapt to different needs
+•	Documentation: Complete documentation for all components and features
 
-1. **Architettura Modulare**: Componenti ben definiti con interfacce standardizzate
-2. **Gestione Robusta degli Errori**: Recupero automatico e gestione degli errori in tutti i componenti
-3. **Logging Completo**: Sistema di logging dettagliato per il monitoraggio e il debugging
-4. **Test Completi**: Suite di test per verificare il corretto funzionamento di tutti i componenti
-5. **Scalabilità**: Progettato per gestire volumi elevati di transazioni
-6. **Sicurezza**: Meccanismi avanzati per proteggere gli investitori e prevenire rug pull
-7. **Configurabilità**: Parametri configurabili per adattarsi a diverse esigenze
-8. **Documentazione**: Documentazione completa per tutti i componenti e le funzionalità
+## Conclusion
 
-## Conclusione
-
-Il sistema LAYER-2-COMPLETE con BuyBot Enterprise è una soluzione completa per il lancio di token su Solana, con funzionalità avanzate per garantire il successo del lancio e la crescita del prezzo del token. Il sistema è progettato per essere facile da usare, sicuro e affidabile, con un'architettura modulare che permette di adattarlo a diverse esigenze.
+The LAYER-2-COMPLETE system with BuyBot Enterprise is a comprehensive solution for launching tokens on Solana, with advanced features to ensure launch success and token price growth. The system is designed to be easy to use, secure, and reliable, with a modular architecture that allows it to be adapted to different needs.
